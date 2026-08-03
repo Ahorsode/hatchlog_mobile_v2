@@ -54,6 +54,13 @@ class SyncEngineService {
         } on Object catch (error) {
           debugPrint('WARN: Nest sync pull skipped: $error');
         }
+
+        // Phase 3: prefer Nest REST for livestock/houses reads when online.
+        try {
+          await _hydrateNestLivestockAndHouses(farmId: farmId);
+        } on Object catch (error) {
+          debugPrint('WARN: Nest livestock/houses read skipped: $error');
+        }
       }
 
       if (_remoteApi.isConfigured) {
@@ -75,6 +82,80 @@ class SyncEngineService {
     } on Object catch (error) {
       debugPrint('WARN: HatchLog Sync Engine skipped $scope: $error');
     }
+  }
+
+  /// Phase 3: Nest-first read for livestock (batches) and houses.
+  /// Writes into local cache so the rest of the app sees them from Drift.
+  Future<void> _hydrateNestLivestockAndHouses({
+    required String farmId,
+  }) async {
+    final livestock = await _hatchlogApi.listLivestock(farmId);
+    if (livestock.isNotEmpty) {
+      final rows = livestock
+          .whereType<Map>()
+          .map((row) => _mapNestLivestockToLocal(row, farmId))
+          .whereType<Map<String, Object?>>()
+          .toList();
+      if (rows.isNotEmpty) {
+        await _localDatabase.upsertCloudRecords({'batches': rows});
+      }
+    }
+
+    final houses = await _hatchlogApi.listHouses(farmId);
+    if (houses.isNotEmpty) {
+      final rows = houses
+          .whereType<Map>()
+          .map((row) => _mapNestHouseToLocal(row, farmId))
+          .whereType<Map<String, Object?>>()
+          .toList();
+      if (rows.isNotEmpty) {
+        await _localDatabase.upsertCloudRecords({'houses': rows});
+      }
+    }
+  }
+
+  Map<String, Object?>? _mapNestLivestockToLocal(
+    Map<dynamic, dynamic> raw,
+    String farmId,
+  ) {
+    final id = raw['id']?.toString();
+    if (id == null || id.isEmpty) return null;
+    return {
+      'id': id,
+      'farm_id': farmId,
+      'house_id': (raw['houseId'] ?? raw['house_id'])?.toString(),
+      'user_id': (raw['userId'] ?? raw['user_id'])?.toString(),
+      'batch_name': (raw['batchName'] ?? raw['batch_name'] ?? raw['name'])
+          ?.toString(),
+      'type': (raw['type'] ?? '')?.toString(),
+      'breed_type': (raw['breedType'] ?? raw['breed_type'])?.toString(),
+      'status': (raw['status'] ?? '')?.toString(),
+      'arrival_date':
+          (raw['arrivalDate'] ?? raw['arrival_date'])?.toString(),
+      'current_count': raw['currentCount'] ?? raw['current_count'] ?? 0,
+      'initial_count': raw['initialCount'] ?? raw['initial_count'] ?? 0,
+      'isolation_count':
+          raw['isolationCount'] ?? raw['isolation_count'] ?? 0,
+      'is_deleted': 0,
+      'is_synced': 1,
+    };
+  }
+
+  Map<String, Object?>? _mapNestHouseToLocal(
+    Map<dynamic, dynamic> raw,
+    String farmId,
+  ) {
+    final id = raw['id']?.toString();
+    if (id == null || id.isEmpty) return null;
+    return {
+      'id': id,
+      'farm_id': farmId,
+      'user_id': (raw['userId'] ?? raw['user_id'])?.toString(),
+      'name': (raw['name'] ?? '')?.toString(),
+      'capacity': raw['capacity'] ?? 0,
+      'is_deleted': 0,
+      'is_synced': 1,
+    };
   }
 
   Future<void> _hydrateNestOperationalLogs({

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../../core/api/hatchlog_api_client.dart';
 import '../../../core/models/app_user.dart';
 import '../../../core/permissions/farm_permissions.dart';
 import '../../../core/storage/local_database.dart';
@@ -26,6 +27,7 @@ class RoleGateway extends StatelessWidget {
     this.pdfInvoiceService,
     this.onRefreshFromCloud,
     this.remoteApi,
+    this.hatchlogApi,
   });
 
   final AppUser currentUser;
@@ -41,6 +43,7 @@ class RoleGateway extends StatelessWidget {
   final dynamic pdfInvoiceService;
   final Future<void> Function()? onRefreshFromCloud;
   final SupabaseRemoteApi? remoteApi;
+  final HatchlogApiClient? hatchlogApi;
 
   @override
   Widget build(BuildContext context) {
@@ -65,6 +68,7 @@ class RoleGateway extends StatelessWidget {
         pdfInvoiceService: pdfInvoiceService,
         onRefreshFromCloud: onRefreshFromCloud,
         remoteApi: remoteApi,
+        hatchlogApi: hatchlogApi,
         logMutator: inputSink is SyncRepository
             ? inputSink as SyncRepository
             : null,
@@ -85,6 +89,7 @@ class RoleGateway extends StatelessWidget {
       pdfInvoiceService: pdfInvoiceService,
       onRefreshFromCloud: onRefreshFromCloud,
       remoteApi: remoteApi,
+      hatchlogApi: hatchlogApi,
     );
   }
 }

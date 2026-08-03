@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/api/hatchlog_api_client.dart';
 import '../../core/models/app_user.dart';
 import '../../core/permissions/farm_permissions.dart';
 import '../../core/storage/local_database.dart';
@@ -26,6 +27,7 @@ class LivestockHubScreen extends StatefulWidget {
     required this.permissions,
     required this.localDatabase,
     this.remoteApi,
+    this.hatchlogApi,
     this.onRefreshFromCloud,
     this.inputSink,
     this.localSalesQueue,
@@ -36,6 +38,7 @@ class LivestockHubScreen extends StatefulWidget {
   final FarmPermissions permissions;
   final LocalDatabase localDatabase;
   final SupabaseRemoteApi? remoteApi;
+  final HatchlogApiClient? hatchlogApi;
   final Future<void> Function()? onRefreshFromCloud;
   final WorkerInputSink? inputSink;
   final LocalSalesQueue? localSalesQueue;
@@ -62,6 +65,7 @@ class _LivestockHubScreenState extends State<LivestockHubScreen> {
     _service = LivestockService(
       repository: LivestockRepository(widget.localDatabase),
       remoteApi: widget.remoteApi,
+      hatchlogApi: widget.hatchlogApi,
     );
     _missingFinanceService = MissingFinanceSetupService(widget.localDatabase);
     _reload();
@@ -194,6 +198,7 @@ class _LivestockHubScreenState extends State<LivestockHubScreen> {
           permissions: widget.permissions,
           localDatabase: widget.localDatabase,
           remoteApi: widget.remoteApi,
+          hatchlogApi: widget.hatchlogApi,
           batchId: batch.id,
           inputSink: widget.inputSink,
           localSalesQueue: widget.localSalesQueue,

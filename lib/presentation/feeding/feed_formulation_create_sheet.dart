@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/api/hatchlog_api_client.dart';
 import '../../core/models/app_user.dart';
 import '../../core/storage/local_database.dart';
 import '../../services/feed_formulation_service.dart';
@@ -28,13 +28,13 @@ class FeedFormulationCreateSheet extends StatefulWidget {
     super.key,
     required this.currentUser,
     required this.localDatabase,
-    this.supabase,
+    this.hatchlogApi,
     this.onOpenInventory,
   });
 
   final AppUser currentUser;
   final LocalDatabase localDatabase;
-  final SupabaseClient? supabase;
+  final HatchlogApiClient? hatchlogApi;
   final VoidCallback? onOpenInventory;
 
   @override
@@ -55,7 +55,10 @@ class _FeedFormulationCreateSheetState extends State<FeedFormulationCreateSheet>
   @override
   void initState() {
     super.initState();
-    _service = FeedFormulationService(widget.localDatabase);
+    _service = FeedFormulationService(
+      widget.localDatabase,
+      hatchlogApi: widget.hatchlogApi,
+    );
     _loadInventory();
   }
 
@@ -138,7 +141,7 @@ class _FeedFormulationCreateSheetState extends State<FeedFormulationCreateSheet>
         type: _selectedType,
         targetLivestock: _selectedLivestock,
         ingredients: payload,
-        supabase: widget.supabase,
+        hatchlogApi: widget.hatchlogApi,
       );
       if (!mounted) {
         return;

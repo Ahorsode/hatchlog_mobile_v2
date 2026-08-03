@@ -29,7 +29,6 @@ class _SettingsHubScreenState extends State<SettingsHubScreen> {
   late final FarmSettingsService _service;
   _SettingsTab _tab = _SettingsTab.farm;
   FarmSettingsData? _settings;
-  SalesSettingsData? _salesSettings;
   List<FeedReorderItem> _feedItems = const [];
   final Map<String, TextEditingController> _reorderControllers = {};
   bool _loading = true;
@@ -91,7 +90,6 @@ class _SettingsHubScreenState extends State<SettingsHubScreen> {
     if (!mounted) return;
     setState(() {
       _settings = settings;
-      _salesSettings = salesSettings;
       _feedItems = feedItems;
       _nameController.text = settings.farmName;
       _locationController.text = settings.farmLocation;
@@ -149,7 +147,6 @@ class _SettingsHubScreenState extends State<SettingsHubScreen> {
       if (!mounted) return;
       setState(() {
         _settings = data;
-        _salesSettings = salesData;
         _message = 'Settings saved.';
       });
     } catch (error) {

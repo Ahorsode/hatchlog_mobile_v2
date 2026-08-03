@@ -14,6 +14,21 @@ class HatchlogApiConfig {
 
   bool get isConfigured => baseUrl.isNotEmpty;
 
+  /// Farm/commerce data requires Nest. Auth stays on Supabase.
+  static HatchlogApiConfig requireConfigured() {
+    final config = load();
+    if (!config.isConfigured) {
+      throw StateError(
+        'HATCHLOG_API_URL is required for farm data sync. '
+        'Set it in .env.mobile or via --dart-define=HATCHLOG_API_URL=...',
+      );
+    }
+    debugPrint(
+      'HatchLog API configured from ${config.source.name}: ${config.baseUrl}',
+    );
+    return config;
+  }
+
   static HatchlogApiConfig load() {
     final fromEnv = (dotenv.env['HATCHLOG_API_URL'] ?? '').trim();
     if (fromEnv.isNotEmpty) {
@@ -32,7 +47,7 @@ class HatchlogApiConfig {
     }
 
     debugPrint(
-      'WARN: HATCHLOG_API_URL not set — Nest sync transport disabled.',
+      'ERROR: HATCHLOG_API_URL not set — Nest farm data transport unavailable.',
     );
     return const HatchlogApiConfig(
       baseUrl: '',

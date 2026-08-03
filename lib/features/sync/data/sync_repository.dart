@@ -197,18 +197,31 @@ class SyncRepository implements WorkerInputSink, WorkerLogMutator {
   }
 
   Future<void> flushPendingInputs() async {
-    if (!_remoteApi.isConfigured && !_hatchlogApi.isConfigured) {
+    if (!_hatchlogApi.isConfigured && !_remoteApi.isConfigured) {
       return;
     }
 
     final pendingInputs = await _localDatabase.readPendingInputs();
     for (final input in pendingInputs) {
       try {
-        if (_hatchlogApi.isConfigured &&
-            _hatchlogApi.supportsEntityType(input.inputType)) {
+        final nestOwned =
+            _hatchlogApi.supportsEntityType(input.inputType) ||
+            _hatchlogApi.supportsCommerceInputType(input.inputType) ||
+            _hatchlogApi.supportsMutationInputType(input.inputType);
+        if (nestOwned) {
+          if (!_hatchlogApi.isConfigured) {
+            throw StateError(
+              'HATCHLOG_API_URL required to sync ${input.inputType}',
+            );
+          }
           await _hatchlogApi.pushQueuedInput(input);
-        } else {
+        } else if (_remoteApi.isConfigured) {
+          // Identity leftovers (team/permissions/profile) stay on Supabase.
           await _remoteApi.pushQueuedInput(input);
+        } else {
+          throw StateError(
+            'No transport configured for ${input.inputType}',
+          );
         }
         final id = input.id;
         if (id != null) {
@@ -234,7 +247,7 @@ class SyncRepository implements WorkerInputSink, WorkerLogMutator {
     AppUser user, {
     bool forceFullRefresh = false,
   }) async {
-    if (!_remoteApi.isConfigured) {
+    if (!_hatchlogApi.isConfigured && !_remoteApi.isConfigured) {
       return;
     }
 
@@ -287,12 +300,47 @@ class SyncRepository implements WorkerInputSink, WorkerLogMutator {
       return;
     }
 
-    debugPrint('[Sync] Pushing ${batches.length} unsynced livestock unit(s) to cloud');
+    debugPrint('[Sync] Pushing ${batches.length} unsynced livestock unit(s) to Nest');
+    if (!_hatchlogApi.isConfigured) {
+      throw StateError('HATCHLOG_API_URL required to sync livestock');
+    }
 
-    final syncedIds = await _remoteApi.pushUnsyncedBatches(
-      farmId: farmId,
-      batches: batches,
-    );
+    final syncedIds = <String>{};
+    for (final batch in batches) {
+      final id = batch['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      try {
+        await _hatchlogApi.createLivestock({
+          'id': id,
+          'farm_id': farmId,
+          'houseId': batch['house_id']?.toString() ?? '',
+          'breedType': batch['breed_type']?.toString() ?? 'UNKNOWN',
+          'type': batch['type']?.toString(),
+          'batchName': batch['batch_name']?.toString(),
+          'initialCount': batch['initial_count'] ?? batch['current_count'] ?? 1,
+          'arrivalDate': batch['arrival_date']?.toString() ??
+              DateTime.now().toIso8601String(),
+        });
+        syncedIds.add(id);
+      } on Object catch (error) {
+        try {
+          await _hatchlogApi.updateLivestock(id, {
+            'houseId': batch['house_id']?.toString(),
+            'breedType': batch['breed_type']?.toString(),
+            'batchName': batch['batch_name']?.toString(),
+            'initialCount': batch['initial_count'],
+            'currentCount': batch['current_count'],
+            'arrivalDate': batch['arrival_date']?.toString(),
+            'status': batch['status']?.toString(),
+          });
+          syncedIds.add(id);
+        } on Object catch (updateError) {
+          debugPrint(
+            '[Sync] Nest livestock push failed for $id: $error / $updateError',
+          );
+        }
+      }
+    }
 
     for (final id in syncedIds) {
       await _localDatabase.updateLocalRecord(
@@ -319,12 +367,40 @@ class SyncRepository implements WorkerInputSink, WorkerLogMutator {
       return;
     }
 
-    debugPrint('[Sync] Pushing ${houses.length} unsynced house(s) to cloud');
+    debugPrint('[Sync] Pushing ${houses.length} unsynced house(s) to Nest');
+    if (!_hatchlogApi.isConfigured) {
+      throw StateError('HATCHLOG_API_URL required to sync houses');
+    }
 
-    final syncedIds = await _remoteApi.pushUnsyncedHouses(
-      farmId: farmId,
-      houses: houses,
-    );
+    final syncedIds = <String>{};
+    for (final house in houses) {
+      final id = house['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      try {
+        await _hatchlogApi.createHouse({
+          'id': id,
+          'farm_id': farmId,
+          'name': house['name']?.toString() ?? 'House',
+          'capacity': house['capacity'] ?? 0,
+          'isIsolation': (house['is_isolation'] == 1) ||
+              house['is_isolation'] == true,
+        });
+        syncedIds.add(id);
+      } on Object catch (error) {
+        try {
+          await _hatchlogApi.updateHouse(id, {
+            'farm_id': farmId,
+            'name': house['name']?.toString(),
+            'capacity': house['capacity'],
+          });
+          syncedIds.add(id);
+        } on Object catch (updateError) {
+          debugPrint(
+            '[Sync] Nest house push failed for $id: $error / $updateError',
+          );
+        }
+      }
+    }
 
     for (final id in syncedIds) {
       await _localDatabase.updateLocalRecord(
@@ -380,18 +456,66 @@ class SyncRepository implements WorkerInputSink, WorkerLogMutator {
             whereArgs: [farmId, ...customerIds],
           );
 
-    await _remoteApi.pushUnsyncedPartnerSettlements(
-      farmId: farmId,
-      expenses: settlements,
-      suppliers: suppliers,
-      customers: customers,
-    );
+    if (!_hatchlogApi.isConfigured) {
+      throw StateError('HATCHLOG_API_URL required to sync partner settlements');
+    }
 
+    for (final supplier in suppliers) {
+      final id = supplier['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      try {
+        await _hatchlogApi.createSupplier({
+          'farm_id': farmId,
+          'name': supplier['name']?.toString() ?? 'Supplier',
+          'phone': supplier['phone']?.toString(),
+          'email': supplier['email']?.toString(),
+          'address': supplier['address']?.toString(),
+          'balanceOwed': supplier['balance_owed'] ?? supplier['balanceOwed'],
+        });
+      } on Object {
+        await _hatchlogApi.updateSupplier(id, {
+          'farm_id': farmId,
+          'name': supplier['name']?.toString(),
+          'phone': supplier['phone']?.toString(),
+          'email': supplier['email']?.toString(),
+          'balanceOwed': supplier['balance_owed'] ?? supplier['balanceOwed'],
+        });
+      }
+    }
+    for (final customer in customers) {
+      final id = customer['id']?.toString();
+      if (id == null || id.isEmpty) continue;
+      try {
+        await _hatchlogApi.createCustomer({
+          'farm_id': farmId,
+          'name': customer['name']?.toString() ?? 'Customer',
+          'phone': customer['phone']?.toString(),
+          'email': customer['email']?.toString(),
+          'address': customer['address']?.toString(),
+          'balanceOwed': customer['balance_owed'] ?? customer['balanceOwed'],
+        });
+      } on Object {
+        await _hatchlogApi.updateCustomer(id, {
+          'farm_id': farmId,
+          'name': customer['name']?.toString(),
+          'phone': customer['phone']?.toString(),
+          'email': customer['email']?.toString(),
+          'balanceOwed': customer['balance_owed'] ?? customer['balanceOwed'],
+        });
+      }
+    }
     for (final row in settlements) {
       final id = row['id']?.toString();
-      if (id == null || id.isEmpty) {
-        continue;
-      }
+      if (id == null || id.isEmpty) continue;
+      await _hatchlogApi.createExpense({
+        'farm_id': farmId,
+        'amount': row['amount'] ?? 0,
+        'category': (row['category'] ?? 'PAYMENT').toString().toUpperCase(),
+        'description': row['description']?.toString(),
+        'expenseDate':
+            row['expense_date']?.toString() ?? row['date']?.toString(),
+        'supplierId': row['supplier_id']?.toString(),
+      });
       await _localDatabase.updateLocalRecord(
         'expenses',
         {'is_synced': 1},
@@ -420,11 +544,49 @@ class SyncRepository implements WorkerInputSink, WorkerLogMutator {
       return;
     }
 
-    await _remoteApi.pushUnsyncedHealthSchedules(
-      farmId: farmId,
-      vaccinations: vaccinations,
-      medications: medications,
+    if (!_hatchlogApi.isConfigured) {
+      throw StateError('HATCHLOG_API_URL required to sync health schedules');
+    }
+
+    String scheduleStatus(Map<String, Object?> row) {
+      final status = row['status']?.toString() ?? '';
+      return status.isEmpty ? 'PENDING' : status;
+    }
+
+    final entries = <Map<String, dynamic>>[
+      for (final row in vaccinations)
+        {
+          'type': 'VACCINATION',
+          'batchId': row['batch_id']?.toString() ?? '',
+          'name': row['vaccine_name']?.toString() ?? '',
+          'scheduledDate': row['scheduled_date']?.toString() ?? '',
+          'status': scheduleStatus(row),
+          if (row['notes'] != null) 'notes': row['notes'],
+          if (row['quantity'] != null) 'quantity': row['quantity'],
+          if (row['usage_type'] != null) 'usageType': row['usage_type'],
+          if (row['unit'] != null) 'unit': row['unit'],
+        },
+      for (final row in medications)
+        {
+          'type': 'MEDICATION',
+          'batchId': row['batch_id']?.toString() ?? '',
+          'name': row['medication_name']?.toString() ?? '',
+          'scheduledDate': row['scheduled_date']?.toString() ?? '',
+          'status': scheduleStatus(row),
+          if (row['notes'] != null) 'notes': row['notes'],
+          if (row['quantity'] != null) 'quantity': row['quantity'],
+          if (row['usage_type'] != null) 'usageType': row['usage_type'],
+          if (row['unit'] != null) 'unit': row['unit'],
+        },
+    ];
+
+    debugPrint(
+      '[Sync] Pushing ${entries.length} unsynced health schedule(s) to Nest',
     );
+    await _hatchlogApi.createHealthSchedules({
+      'farm_id': farmId,
+      'entries': entries,
+    });
 
     for (final row in vaccinations) {
       final id = row['id']?.toString();

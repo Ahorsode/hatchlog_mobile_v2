@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/api/hatchlog_api_client.dart';
 import '../../core/models/app_user.dart';
 import '../../core/permissions/farm_permissions.dart';
 import '../../core/storage/local_database.dart';
@@ -32,6 +33,7 @@ class LivestockDetailScreen extends StatefulWidget {
     required this.localDatabase,
     required this.batchId,
     this.remoteApi,
+    this.hatchlogApi,
     this.inputSink,
     this.localSalesQueue,
     this.pdfInvoiceService,
@@ -42,6 +44,7 @@ class LivestockDetailScreen extends StatefulWidget {
   final LocalDatabase localDatabase;
   final String batchId;
   final SupabaseRemoteApi? remoteApi;
+  final HatchlogApiClient? hatchlogApi;
   final WorkerInputSink? inputSink;
   final LocalSalesQueue? localSalesQueue;
   final PdfInvoiceService? pdfInvoiceService;
@@ -75,6 +78,7 @@ class _LivestockDetailScreenState extends State<LivestockDetailScreen>
     _service = LivestockService(
       repository: LivestockRepository(widget.localDatabase),
       remoteApi: widget.remoteApi,
+      hatchlogApi: widget.hatchlogApi,
     );
     _analyticsService = BatchAnalyticsService(widget.localDatabase);
     _healthRepository = HealthScheduleRepository(widget.localDatabase);

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/models/app_user.dart';
 import '../../core/permissions/permissions_repository.dart';
 import '../../core/models/worker_input_type.dart';
 import '../../core/storage/local_database.dart';

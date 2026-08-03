@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/api/hatchlog_api_client.dart';
 import '../../core/models/app_user.dart';
 import '../../core/storage/local_database.dart';
 import '../../features/auth/data/supabase_remote_api.dart';
@@ -23,6 +24,7 @@ class WorkerQuarantineScreen extends StatefulWidget {
     required this.batches,
     required this.canEdit,
     this.remoteApi,
+    this.hatchlogApi,
   });
 
   final AppUser currentUser;
@@ -31,6 +33,7 @@ class WorkerQuarantineScreen extends StatefulWidget {
   final List<BatchSummary> batches;
   final bool canEdit;
   final SupabaseRemoteApi? remoteApi;
+  final HatchlogApiClient? hatchlogApi;
 
   @override
   State<WorkerQuarantineScreen> createState() => _WorkerQuarantineScreenState();
@@ -62,6 +65,7 @@ class _WorkerQuarantineScreenState extends State<WorkerQuarantineScreen> {
     _livestockService = LivestockService(
       repository: LivestockRepository(widget.localDatabase),
       remoteApi: widget.remoteApi,
+      hatchlogApi: widget.hatchlogApi,
     );
     _subscription = widget.localDatabase
         .watchTables(const ['isolation_rooms', 'batches', 'quarantine', 'mortality'])
@@ -158,16 +162,14 @@ class _WorkerQuarantineScreenState extends State<WorkerQuarantineScreen> {
         'updated_at': DateTime.now().toIso8601String(),
       });
 
-      final remote = widget.remoteApi;
-      if (remote != null && remote.isConfigured) {
+      final nest = widget.hatchlogApi;
+      if (nest != null && nest.isConfigured) {
         try {
-          await remote.createIsolationRoom(
-            id: roomId,
-            farmId: widget.currentUser.activeFarmId,
-            userId: widget.currentUser.id,
-            name: name,
-            capacity: capacity,
-          );
+          await nest.createIsolationRoom({
+            'farm_id': widget.currentUser.activeFarmId,
+            'name': name,
+            'capacity': capacity < 1 ? 1 : capacity,
+          });
         } on Object catch (error) {
           if (mounted) {
             _showMessage('Saved locally. Cloud sync pending: $error');

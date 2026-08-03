@@ -1,3 +1,4 @@
+import '../../../core/api/hatchlog_api_client.dart';
 import '../../../core/models/app_user.dart';
 import '../../../features/auth/data/supabase_remote_api.dart';
 import '../../../features/health/data/health_schedule_repository.dart';
@@ -23,11 +24,14 @@ class LivestockService {
   LivestockService({
     required LivestockRepository repository,
     SupabaseRemoteApi? remoteApi,
+    HatchlogApiClient? hatchlogApi,
   })  : _repository = repository,
-        _remoteApi = remoteApi;
+        _remoteApi = remoteApi,
+        _hatchlogApi = hatchlogApi;
 
   final LivestockRepository _repository;
   final SupabaseRemoteApi? _remoteApi;
+  final HatchlogApiClient? _hatchlogApi;
 
   LivestockRepository get repository => _repository;
 
@@ -78,21 +82,37 @@ class LivestockService {
 
     var remoteSynced = false;
     try {
-      final remote = _remoteApi;
-      if (remote != null && remote.isConfigured) {
-        await remote.createLivestockBatch(
-          id: batchId,
-          farmId: user.activeFarmId,
-          userId: user.id,
-          batchName: draft.batchName.trim(),
-          breedType: draft.breedKey,
-          type: draft.type,
-          houseId: draft.houseId,
-          initialCount: draft.initialCount,
-          arrivalDate: draft.arrivalDate,
-        );
+      final nest = _hatchlogApi;
+      if (nest != null && nest.isConfigured) {
+        await nest.createLivestock({
+          'id': batchId,
+          'farm_id': user.activeFarmId,
+          'houseId': draft.houseId,
+          'breedType': draft.breedKey,
+          'type': draft.type,
+          'batchName': draft.batchName.trim(),
+          'initialCount': draft.initialCount,
+          'arrivalDate': draft.arrivalDate.toIso8601String(),
+        });
         await _repository.markBatchSynced(batchId);
         remoteSynced = true;
+      } else {
+        final remote = _remoteApi;
+        if (remote != null && remote.isConfigured) {
+          await remote.createLivestockBatch(
+            id: batchId,
+            farmId: user.activeFarmId,
+            userId: user.id,
+            batchName: draft.batchName.trim(),
+            breedType: draft.breedKey,
+            type: draft.type,
+            houseId: draft.houseId,
+            initialCount: draft.initialCount,
+            arrivalDate: draft.arrivalDate,
+          );
+          await _repository.markBatchSynced(batchId);
+          remoteSynced = true;
+        }
       }
     } on Object catch (error) {
       return LivestockOperationResult(
@@ -157,21 +177,34 @@ class LivestockService {
 
     var remoteSynced = false;
     try {
-      final remote = _remoteApi;
-      if (remote != null && remote.isConfigured) {
-        await remote.updateLivestockBatch(
-          id: batchId,
-          farmId: user.activeFarmId,
-          batchName: draft.batchName.trim(),
-          breedType: draft.breedKey,
-          type: draft.type,
-          houseId: draft.houseId,
-          initialCount: draft.initialCount,
-          arrivalDate: draft.arrivalDate,
-          status: draft.status,
-          growthTargetOverride: draft.growthTargetOverride.trim(),
-        );
+      final nest = _hatchlogApi;
+      if (nest != null && nest.isConfigured) {
+        await nest.updateLivestock(batchId, {
+          'houseId': draft.houseId,
+          'breedType': draft.breedKey,
+          'batchName': draft.batchName.trim(),
+          'initialCount': draft.initialCount,
+          'arrivalDate': draft.arrivalDate.toIso8601String(),
+          'status': draft.status,
+        });
         remoteSynced = true;
+      } else {
+        final remote = _remoteApi;
+        if (remote != null && remote.isConfigured) {
+          await remote.updateLivestockBatch(
+            id: batchId,
+            farmId: user.activeFarmId,
+            batchName: draft.batchName.trim(),
+            breedType: draft.breedKey,
+            type: draft.type,
+            houseId: draft.houseId,
+            initialCount: draft.initialCount,
+            arrivalDate: draft.arrivalDate,
+            status: draft.status,
+            growthTargetOverride: draft.growthTargetOverride.trim(),
+          );
+          remoteSynced = true;
+        }
       }
     } on Object catch (error) {
       return LivestockOperationResult(
@@ -205,14 +238,20 @@ class LivestockService {
 
     var remoteSynced = false;
     try {
-      final remote = _remoteApi;
-      if (remote != null && remote.isConfigured) {
-        await remote.deleteLivestockBatch(
-          id: batchId,
-          farmId: user.activeFarmId,
-          reason: reason.trim(),
-        );
+      final nest = _hatchlogApi;
+      if (nest != null && nest.isConfigured) {
+        await nest.deleteLivestock(batchId, reason.trim());
         remoteSynced = true;
+      } else {
+        final remote = _remoteApi;
+        if (remote != null && remote.isConfigured) {
+          await remote.deleteLivestockBatch(
+            id: batchId,
+            farmId: user.activeFarmId,
+            reason: reason.trim(),
+          );
+          remoteSynced = true;
+        }
       }
     } on Object catch (error) {
       return LivestockOperationResult(
@@ -243,35 +282,11 @@ class LivestockService {
       carriageCost: draft.carriageCost,
     );
 
-    var remoteSynced = false;
-    try {
-      final remote = _remoteApi;
-      if (remote != null && remote.isConfigured) {
-        await remote.updateLivestockBatchFinancials(
-          batchId: batchId,
-          farmId: user.activeFarmId,
-          userId: user.id,
-          actualCost: actualCost,
-          carriageInward: draft.carriageCost,
-          otherExpenses: draft.otherExpenses
-              .map((item) => {'label': item.label, 'amount': item.amount})
-              .toList(),
-        );
-        remoteSynced = true;
-      }
-    } on Object catch (error) {
-      return LivestockOperationResult(
-        success: true,
-        batchId: batchId,
-        remoteSynced: false,
-        error: 'Saved locally. Cloud sync pending: $error',
-      );
-    }
-
+    // No Nest financials endpoint yet — keep local-only (no Supabase farm writes).
     return LivestockOperationResult(
       success: true,
       batchId: batchId,
-      remoteSynced: remoteSynced,
+      remoteSynced: false,
     );
   }
 
@@ -294,13 +309,13 @@ class LivestockService {
 
     var remoteSynced = false;
     try {
-      final remote = _remoteApi;
-      if (remote != null && remote.isConfigured) {
-        await remote.returnLivestockFromIsolation(
-          batchId: batchId,
-          farmId: user.activeFarmId,
-          count: count,
-        );
+      final nest = _hatchlogApi;
+      if (nest != null && nest.isConfigured) {
+        await nest.returnFromIsolation({
+          'farm_id': user.activeFarmId,
+          'batchId': batchId,
+          'count': count,
+        });
         remoteSynced = true;
       }
     } on Object catch (error) {
@@ -339,15 +354,14 @@ class LivestockService {
 
     var remoteSynced = false;
     try {
-      final remote = _remoteApi;
-      if (remote != null && remote.isConfigured) {
-        await remote.logLivestockMortalityInIsolation(
-          batchId: batchId,
-          farmId: user.activeFarmId,
-          userId: user.id,
-          count: count,
-          reason: reason,
-        );
+      final nest = _hatchlogApi;
+      if (nest != null && nest.isConfigured) {
+        await nest.logIsolationMortality({
+          'farm_id': user.activeFarmId,
+          'batchId': batchId,
+          'count': count,
+          'reason': reason,
+        });
         remoteSynced = true;
       }
     } on Object catch (error) {

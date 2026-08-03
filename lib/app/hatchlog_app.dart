@@ -364,6 +364,7 @@ class _HatchLogAppState extends State<HatchLogApp> {
               onRefreshFromCloud: () => widget.services.syncRepository
                   .syncWithCloud(_currentUser!, forceFullRefresh: true),
               remoteApi: widget.services.remoteApi,
+              hatchlogApi: widget.services.hatchlogApi,
             ),
     );
   }

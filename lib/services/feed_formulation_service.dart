@@ -1,7 +1,6 @@
 import 'dart:math';
 
-import 'package:supabase_flutter/supabase_flutter.dart';
-
+import '../core/api/hatchlog_api_client.dart';
 import '../core/storage/local_database.dart';
 import '../utils/feed_inventory_filter.dart';
 
@@ -16,9 +15,13 @@ class FeedFormulationIngredientInput {
 }
 
 class FeedFormulationService {
-  FeedFormulationService(this._localDatabase);
+  FeedFormulationService(
+    this._localDatabase, {
+    HatchlogApiClient? hatchlogApi,
+  }) : _hatchlogApi = hatchlogApi;
 
   final LocalDatabase _localDatabase;
+  final HatchlogApiClient? _hatchlogApi;
 
   String _newId() {
     final random = Random.secure();
@@ -49,7 +52,7 @@ class FeedFormulationService {
     required String type,
     String? targetLivestock,
     required List<FeedFormulationIngredientInput> ingredients,
-    SupabaseClient? supabase,
+    HatchlogApiClient? hatchlogApi,
   }) async {
     if (name.trim().isEmpty) {
       throw ArgumentError('Formulation name is required');
@@ -136,46 +139,22 @@ class FeedFormulationService {
       );
     }
 
-    if (supabase != null) {
-      await supabase.from('feed_formulations').upsert({
-        'id': formulationId,
-        'farmId': farmId,
+    final api = hatchlogApi ?? _hatchlogApi;
+    if (api != null && api.isConfigured) {
+      await api.createFeedFormulation({
+        'farm_id': farmId,
         'name': name.trim(),
         'type': type,
-        'targetLivestock': targetLivestock,
-        'stockLevel': totalBags,
-        'createdAt': now,
-        'updatedAt': now,
+        if (targetLivestock != null && targetLivestock.trim().isNotEmpty)
+          'targetLivestock': targetLivestock,
+        'ingredients': [
+          for (final ingredient in ingredients)
+            {
+              'inventoryId': ingredient.inventoryId,
+              'quantity': ingredient.bags,
+            },
+        ],
       });
-      await supabase.from('feed_formulation_ingredients').upsert(
-        ingredientRows
-            .map(
-              (row) => {
-                'id': row['id'],
-                'formulationId': formulationId,
-                'inventoryId': row['inventory_id'],
-                'quantity': row['quantity'],
-                'unit': row['unit'],
-              },
-            )
-            .toList(),
-      );
-      for (final ingredient in ingredients) {
-        final rows = await _localDatabase.queryLocalRecords(
-          'inventory',
-          where: 'id = ?',
-          whereArgs: [ingredient.inventoryId],
-          limit: 1,
-        );
-        if (rows.isEmpty) {
-          continue;
-        }
-        final stock = _asDouble(rows.first['stock_level']);
-        await supabase
-            .from('inventory')
-            .update({'stockLevel': stock})
-            .eq('id', ingredient.inventoryId);
-      }
     }
 
     return formulationId;

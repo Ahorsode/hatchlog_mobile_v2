@@ -64,7 +64,7 @@ class AppServices {
     );
     remoteApi.setAutoRefreshEnabled(initiallyOnline);
     final hatchlogApi = HatchlogApiClient(
-      config: HatchlogApiConfig.load(),
+      config: HatchlogApiConfig.requireConfigured(),
     );
     final authRefreshSubscription = connectivityService.onOnlineChanged.listen(
       remoteApi.setAutoRefreshEnabled,

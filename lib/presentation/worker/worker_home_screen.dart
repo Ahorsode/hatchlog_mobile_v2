@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/api/hatchlog_api_client.dart';
 import '../../core/models/app_user.dart';
 import '../../core/permissions/farm_permissions.dart';
 import '../../core/storage/local_database.dart';
@@ -50,6 +51,7 @@ class WorkerHomeScreen extends StatefulWidget {
     this.pdfInvoiceService,
     this.onRefreshFromCloud,
     this.remoteApi,
+    this.hatchlogApi,
     this.logMutator,
   });
 
@@ -65,6 +67,7 @@ class WorkerHomeScreen extends StatefulWidget {
   final PdfInvoiceService? pdfInvoiceService;
   final Future<void> Function()? onRefreshFromCloud;
   final SupabaseRemoteApi? remoteApi;
+  final HatchlogApiClient? hatchlogApi;
   final WorkerLogMutator? logMutator;
 
   @override
@@ -111,7 +114,7 @@ class _WorkerHomeScreenState extends State<WorkerHomeScreen> {
     super.initState();
     _dashboardStatsService = DashboardStatsService(
       widget.localDatabase,
-      widget.remoteApi,
+      widget.hatchlogApi,
     );
     _connectionSubscription = widget.connectionChanges.listen((online) {
       if (mounted) {
@@ -276,6 +279,7 @@ class _WorkerHomeScreenState extends State<WorkerHomeScreen> {
             batches: _batches,
             canEdit: module.canEdit,
             remoteApi: widget.remoteApi,
+            hatchlogApi: widget.hatchlogApi,
           ),
         ),
       );
@@ -745,13 +749,6 @@ class _WorkerHomeScreenState extends State<WorkerHomeScreen> {
   }
 
   Future<void> _openFeedFormulationCreate() async {
-    SupabaseClient? supabase;
-    try {
-      supabase = Supabase.instance.client;
-    } on Object {
-      supabase = null;
-    }
-
     final message = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
@@ -761,7 +758,7 @@ class _WorkerHomeScreenState extends State<WorkerHomeScreen> {
         return FeedFormulationCreateSheet(
           currentUser: widget.currentUser,
           localDatabase: widget.localDatabase,
-          supabase: supabase,
+          hatchlogApi: widget.hatchlogApi,
           onOpenInventory: _openInventoryFromEmptyFeed,
         );
       },

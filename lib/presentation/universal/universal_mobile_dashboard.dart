@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/api/hatchlog_api_client.dart';
 import '../../core/models/app_user.dart';
 import '../../core/models/worker_input_type.dart';
 import '../../core/permissions/farm_permissions.dart';
@@ -16,6 +17,7 @@ import '../../services/feed_formulation_service.dart';
 import '../../services/local_house_service.dart';
 import '../../utils/active_farm_id.dart';
 import '../../utils/house_climate_utils.dart';
+import '../../features/sales/sale_line_draft.dart';
 import '../../services/local_sales_queue.dart';
 import '../../services/pdf_invoice_service.dart';
 import '../analytics/farm_analytics_screen.dart';
@@ -60,6 +62,7 @@ class UniversalMobileDashboard extends StatefulWidget {
     this.pdfInvoiceService,
     this.onRefreshFromCloud,
     this.remoteApi,
+    this.hatchlogApi,
   });
 
   final AppUser currentUser;
@@ -75,6 +78,7 @@ class UniversalMobileDashboard extends StatefulWidget {
   final PdfInvoiceService? pdfInvoiceService;
   final Future<void> Function()? onRefreshFromCloud;
   final SupabaseRemoteApi? remoteApi;
+  final HatchlogApiClient? hatchlogApi;
 
   @override
   State<UniversalMobileDashboard> createState() =>
@@ -109,19 +113,16 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
     _loadBatchNameCache();
     _executiveMetricsService = ExecutiveMetricsService(
       widget.localDatabase,
-      widget.remoteApi,
+      widget.hatchlogApi,
     );
     _dashboardStatsService = DashboardStatsService(
       widget.localDatabase,
-      widget.remoteApi,
+      widget.hatchlogApi,
     );
     _inventoryRepository = InventoryRepository(widget.localDatabase);
     _permissions = widget.permissions.toMap();
     _visibleModules = _buildFencedModules(_modules, _permissions);
-    _streams = {
-      for (final module in _visibleModules)
-        if (!module.isDashboard) module.table: _streamFor(module),
-    };
+    _streams = _buildStreams(_visibleModules);
     widget.isOnline().then((online) {
       if (mounted) {
         setState(() => _isOnline = online);
@@ -186,6 +187,26 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
     super.dispose();
   }
 
+  /// Nest-hydrated ops/commerce tables — read from local SQLite cache only.
+  static const _nestLocalCacheTables = {
+    'batches',
+    'houses',
+    'egg_production',
+    'daily_feeding_logs',
+    'mortality',
+    'inventory',
+    'customers',
+    'suppliers',
+    'sales',
+    'expenses',
+    'feed_formulations',
+    // Local ledger mirror for Nest sales/expenses modules.
+    'financial_transactions',
+  };
+
+  bool _isNestLocalCacheTable(String table) =>
+      _nestLocalCacheTables.contains(table);
+
   Stream<List<Map<String, dynamic>>> _streamFor(_HatchModuleConfig module) {
     if (module.table == 'houses') {
       return widget.localDatabase
@@ -194,6 +215,17 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
           .asBroadcastStream();
     }
 
+    if (_isNestLocalCacheTable(module.table)) {
+      final watched = module.table == 'financial_transactions'
+          ? const ['financial_transactions', 'sales', 'expenses']
+          : <String>[module.table];
+      return widget.localDatabase
+          .watchTables(watched)
+          .asyncMap((_) => _loadLocalModuleRows(module))
+          .asBroadcastStream();
+    }
+
+    // Team / permissions and non-Nest modules stay on Supabase live streams.
     final supabase = _supabase;
     if (supabase == null) {
       return Stream<List<Map<String, dynamic>>>.empty().asBroadcastStream();
@@ -215,6 +247,138 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
     return stream
         .map((rows) => _applyEqualsFilters(rows, module.streamEquals))
         .asBroadcastStream();
+  }
+
+  Future<List<Map<String, dynamic>>> _loadLocalModuleRows(
+    _HatchModuleConfig module,
+  ) async {
+    final farmId = _dashboardFarmId();
+    if (farmId.isEmpty) {
+      return const [];
+    }
+
+    if (module.table == 'financial_transactions') {
+      final rows = await _loadLocalLedgerRows(farmId);
+      if (module.streamEquals.isEmpty) {
+        return rows;
+      }
+      return _applyEqualsFilters(rows, module.streamEquals);
+    }
+
+    final orderBy = _localOrderBy(module.orderBy);
+    final rows = await widget.localDatabase.queryLocalRecords(
+      module.table,
+      where: 'farm_id = ? and coalesce(is_deleted, 0) = 0',
+      whereArgs: [farmId],
+      orderBy: orderBy,
+      limit: 100,
+    );
+    final mapped = rows
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList(growable: false);
+    if (module.streamEquals.isEmpty) {
+      return mapped;
+    }
+    return _applyEqualsFilters(mapped, module.streamEquals);
+  }
+
+  Future<List<Map<String, dynamic>>> _loadLocalLedgerRows(String farmId) async {
+    final byId = <String, Map<String, dynamic>>{};
+
+    final transactions = await widget.localDatabase.queryLocalRecords(
+      'financial_transactions',
+      where: 'farm_id = ? and coalesce(is_deleted, 0) = 0',
+      whereArgs: [farmId],
+      orderBy: 'transaction_date desc',
+      limit: 100,
+    );
+    for (final row in transactions) {
+      final id = row['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      byId[id] = Map<String, dynamic>.from(row);
+    }
+
+    final sales = await widget.localDatabase.queryLocalRecords(
+      'sales',
+      where: 'farm_id = ? and coalesce(is_deleted, 0) = 0',
+      whereArgs: [farmId],
+      orderBy: 'sale_date desc',
+      limit: 100,
+    );
+    for (final row in sales) {
+      final id = row['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      byId.putIfAbsent(id, () {
+        final amount = row['total_amount'] ?? row['amount_received'] ?? 0;
+        return <String, dynamic>{
+          'id': id,
+          'farm_id': farmId,
+          'type': 'REVENUE',
+          'category': 'SALES',
+          'amount': amount,
+          'total_amount': amount,
+          'customer_name': row['customer_name'],
+          'description': row['customer_name'] == null
+              ? 'Sale'
+              : 'Sale to ${row['customer_name']}',
+          'payment_method': row['payment_method'],
+          'payment_status': row['status'],
+          'transaction_date': row['sale_date'] ?? row['created_at'],
+          'created_at': row['created_at'],
+          'deposit_amount': row['deposit_amount'] ?? row['amount_received'],
+          'outstanding_credit': row['outstanding_credit'],
+          'is_deleted': 0,
+        };
+      });
+    }
+
+    final expenses = await widget.localDatabase.queryLocalRecords(
+      'expenses',
+      where: 'farm_id = ? and coalesce(is_deleted, 0) = 0',
+      whereArgs: [farmId],
+      orderBy: 'expense_date desc',
+      limit: 100,
+    );
+    for (final row in expenses) {
+      final id = row['id']?.toString() ?? '';
+      if (id.isEmpty) continue;
+      byId.putIfAbsent(id, () {
+        return <String, dynamic>{
+          'id': id,
+          'farm_id': farmId,
+          'type': 'EXPENSE',
+          'category': row['category'],
+          'amount': row['amount'],
+          'description': row['description'],
+          'payment_method': row['payment_method'],
+          'payment_status': 'PAID',
+          'transaction_date': row['expense_date'] ?? row['created_at'],
+          'created_at': row['created_at'],
+          'is_deleted': 0,
+        };
+      });
+    }
+
+    final rows = byId.values.toList(growable: false);
+    rows.sort((a, b) {
+      final aDate = _objectText(a['transaction_date'] ?? a['created_at']);
+      final bDate = _objectText(b['transaction_date'] ?? b['created_at']);
+      return bDate.compareTo(aDate);
+    });
+    return rows.take(100).toList(growable: false);
+  }
+
+  String _localOrderBy(String orderBy) {
+    final column = orderBy.contains('_')
+        ? orderBy
+        : orderBy.replaceAllMapped(
+            RegExp(r'[A-Z]'),
+            (match) => '_${match.group(0)!.toLowerCase()}',
+          );
+    if (column == 'name' || column == 'batch_name') {
+      return '$column asc';
+    }
+    return '$column desc';
   }
 
   String _activeFarmId(SupabaseClient supabase) {
@@ -346,7 +510,10 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
             ),
           )
           .toList();
-      final service = FeedFormulationService(widget.localDatabase);
+      final service = FeedFormulationService(
+        widget.localDatabase,
+        hatchlogApi: widget.hatchlogApi,
+      );
       await service.createFormulation(
         farmId: widget.currentUser.activeFarmId,
         name: _objectText(row['name']),
@@ -355,8 +522,18 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
           row['targetLivestock'] ?? row['target_livestock'],
         ),
         ingredients: ingredients,
-        supabase: _supabase,
+        hatchlogApi: widget.hatchlogApi,
       );
+      return;
+    }
+
+    if (module.table == 'customers' || module.table == 'suppliers') {
+      await _insertNestPartnerLocally(module.table, row);
+      return;
+    }
+
+    if (module.table == 'financial_transactions') {
+      await _insertLedgerRowLocally(module, row);
       return;
     }
 
@@ -368,6 +545,13 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
         payload: queuedInput.payload,
       );
       return;
+    }
+
+    // Nest-owned tables must never write via Supabase.from().insert.
+    if (_isNestLocalCacheTable(module.table)) {
+      throw Exception(
+        'Nest-owned module "${module.table}" must use local/Nest sync outbox.',
+      );
     }
 
     final supabase = _supabase;
@@ -399,59 +583,150 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
       ...metadata,
       ...row,
     });
+  }
 
-    if (module.table == 'batches') {
-      await _mirrorBatchToLocal(
-        row: {
-          'id': recordId,
-          ...metadata,
-          ...row,
-        },
-        farmId: activeTenantId,
-        userId: createdBy,
+  Future<void> _insertNestPartnerLocally(
+    String table,
+    Map<String, dynamic> row,
+  ) async {
+    final farmId = widget.currentUser.activeFarmId;
+    if (farmId.isEmpty) {
+      throw Exception('No active farm is available for local save.');
+    }
+    final id = _objectText(row['id']).isEmpty
+        ? _newTextId(table)
+        : _objectText(row['id']);
+    final now = DateTime.now().toIso8601String();
+    final name = _objectText(row['name']);
+    final phone = _objectText(row['phone']);
+    final email = _objectText(row['email']);
+    final address = _objectText(row['address']);
+    final values = <String, Object?>{
+      'id': id,
+      'farm_id': farmId,
+      'user_id': widget.currentUser.id,
+      'name': name,
+      'phone': phone,
+      'email': email,
+      'address': address,
+      'balance_owed': 0,
+      'is_deleted': 0,
+      'is_synced': 0,
+      'created_at': now,
+      'updated_at': now,
+    };
+    if (table == 'customers') {
+      values['customer_type'] = _objectText(row['customer_type']);
+    }
+    await widget.localDatabase.insertLocalRecord(table, values);
+
+    final api = widget.hatchlogApi;
+    if (api == null || !api.isConfigured) {
+      return;
+    }
+    try {
+      final body = <String, dynamic>{
+        'id': id,
+        'farm_id': farmId,
+        'name': name.isEmpty ? (table == 'customers' ? 'Customer' : 'Supplier') : name,
+        if (phone.isNotEmpty) 'phone': phone,
+        if (email.isNotEmpty) 'email': email,
+        if (address.isNotEmpty) 'address': address,
+        'balanceOwed': 0,
+      };
+      if (table == 'customers') {
+        await api.createCustomer(body);
+      } else {
+        await api.createSupplier(body);
+      }
+      await widget.localDatabase.updateLocalRecord(
+        table,
+        {'is_synced': 1},
+        where: 'id = ?',
+        whereArgs: [id],
       );
+    } on Object catch (error) {
+      debugPrint('WARN: Nest $table create deferred to later sync: $error');
     }
   }
 
-  Future<void> _mirrorBatchToLocal({
-    required Map<String, dynamic> row,
-    required String farmId,
-    required String userId,
-  }) async {
-    if (farmId.isEmpty) {
+  Future<void> _insertLedgerRowLocally(
+    _HatchModuleConfig module,
+    Map<String, dynamic> row,
+  ) async {
+    final type = _objectText(row['type']).toUpperCase();
+    final category = _objectText(row['category']).toUpperCase();
+    final isSales = module.streamEquals['category'] == 'SALES' ||
+        category == 'SALES' ||
+        type == 'REVENUE' ||
+        type == 'SALE' ||
+        type == 'SALES';
+
+    if (isSales) {
+      final queue = widget.localSalesQueue;
+      if (queue == null) {
+        throw Exception('Local sales queue is unavailable for Nest sales.');
+      }
+      final quantity = _objectDouble(row['quantity']);
+      final unitPrice = _objectDouble(row['unit_price']);
+      final qty = quantity <= 0 ? 1 : quantity.round();
+      final item = _objectText(row['item']).isEmpty
+          ? _objectText(row['description']).isEmpty
+                ? 'Farm sale'
+                : _objectText(row['description'])
+          : _objectText(row['item']);
+      final received = _objectDouble(row['amount_received']);
+      final total = quantity > 0 && unitPrice > 0
+          ? quantity * unitPrice
+          : _objectDouble(row['amount']);
+      final cash = received > 0 ? received : total;
+      final paymentMethod = _objectText(row['payment_method']).isEmpty
+          ? 'CASH'
+          : _objectText(row['payment_method']).toUpperCase().replaceAll(' ', '_');
+      await queue.enqueueMultiLineSale(
+        userId: widget.currentUser.id,
+        farmId: widget.currentUser.activeFarmId,
+        items: [
+          SaleLineDraft(
+            productType: SaleProductType.custom,
+            description: item,
+            quantity: qty < 1 ? 1 : qty,
+            unitPrice: unitPrice > 0
+                ? unitPrice
+                : (total / (qty < 1 ? 1 : qty)),
+          ),
+        ],
+        orderDate: DateTime.now(),
+        totalCashReceived: cash,
+        customerName: _objectText(row['customer_name']).isEmpty
+            ? 'Walk-in Customer'
+            : _objectText(row['customer_name']),
+        paymentMethod: paymentMethod,
+        requireExactCashTotal: false,
+      );
       return;
     }
-    final now = DateTime.now().toIso8601String();
-    final status = _objectText(row['status']);
-    await widget.localDatabase.insertLocalRecord('batches', {
-      'id': _objectText(row['id']),
-      'farm_id': farmId,
-      'house_id': _objectText(row['houseId'] ?? row['house_id']),
-      'user_id': userId,
-      'batch_name': _objectText(row['batchName'] ?? row['batch_name']),
-      'breed_type': _objectText(row['breedType'] ?? row['breed_type']),
-      'bird_strain': _objectText(row['breedType'] ?? row['breed_type']),
-      'type': _objectText(row['type']),
-      'status': status.isEmpty ? 'active' : status,
-      'active_state': status.isEmpty ? 'active' : status,
-      'current_count': _objectInt(row['currentCount'] ?? row['current_count']),
-      'initial_count': _objectInt(row['initialCount'] ?? row['initial_count']),
-      'isolation_count': _objectInt(
-        row['isolationCount'] ?? row['isolation_count'],
-      ),
-      'arrival_date': _objectText(
-        row['arrivalDate'] ?? row['arrival_date'],
-      ).isEmpty
-          ? now
-          : _objectText(row['arrivalDate'] ?? row['arrival_date']),
-      'is_deleted': 0,
-      'created_at': _objectText(row['createdAt'] ?? row['created_at']).isEmpty
-          ? now
-          : _objectText(row['createdAt'] ?? row['created_at']),
-      'updated_at': _objectText(row['updatedAt'] ?? row['updated_at']).isEmpty
-          ? now
-          : _objectText(row['updatedAt'] ?? row['updated_at']),
-    });
+
+    // Expense / finance outbox via Nest commerce sync.
+    await widget.inputSink.enqueueWorkerInput(
+      user: widget.currentUser,
+      type: WorkerInputType.expenseAllocation,
+      payload: {
+        'amount': _objectDouble(row['amount']),
+        'category': _objectText(row['category']).isEmpty
+            ? 'OTHER'
+            : _objectText(row['category']),
+        'description': _objectText(row['description']),
+        'expense_date': _objectText(row['transaction_date']).isEmpty
+            ? DateTime.now().toIso8601String()
+            : _objectText(row['transaction_date']),
+        'expenseDate': _objectText(row['transaction_date']).isEmpty
+            ? DateTime.now().toIso8601String()
+            : _objectText(row['transaction_date']),
+        'reference': _objectText(row['reference_num']),
+        'allocations': const <Map<String, Object?>>[],
+      },
+    );
   }
 
   _QueuedWorkerInput? _queuedWorkerInputFor(
@@ -511,21 +786,46 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
           },
         );
       case 'mortality':
-        if (_objectText(row['type']).toUpperCase() != 'DEAD') {
-          return null;
-        }
+        final healthType = _objectText(row['type']).isEmpty
+            ? 'DEAD'
+            : _objectText(row['type']).toUpperCase();
         return _QueuedWorkerInput(
           type: WorkerInputType.mortality,
           payload: {
             'batch_id': _objectText(row['batchId'] ?? row['batch_id']),
-            'count': _objectInt(row['count'] ?? row['dead_count']),
+            'count': _objectInt(
+              row['count'] ?? row['dead_count'] ?? row['isolated_count'],
+            ),
+            'type': healthType,
+            'health_type': healthType,
             'reason': _objectText(row['reason'] ?? row['suspected_cause']),
             'category': _objectText(row['category']),
             'sub_category': _objectText(row['sub_category']),
+            'isolation_room_id': _objectText(row['isolation_room_id']),
             'device_logged_at':
                 _objectText(row['logDate'] ?? row['log_date']).isEmpty
                 ? DateTime.now().toIso8601String()
                 : _objectText(row['logDate'] ?? row['log_date']),
+            'log_date':
+                _objectText(row['logDate'] ?? row['log_date']).isEmpty
+                ? DateTime.now().toIso8601String()
+                : _objectText(row['logDate'] ?? row['log_date']),
+          },
+        );
+      case 'inventory':
+        return _QueuedWorkerInput(
+          type: WorkerInputType.inventoryItem,
+          payload: {
+            'item_name': _objectText(
+              row['itemName'] ?? row['item_name'] ?? row['name'],
+            ),
+            'stock_level': _objectDouble(
+              row['stockLevel'] ?? row['stock_level'] ?? row['quantity'],
+            ),
+            'unit': _objectText(row['unit']).isEmpty
+                ? 'units'
+                : _objectText(row['unit']),
+            'category': _objectText(row['category']),
           },
         );
     }
@@ -553,7 +853,11 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
           module: module,
           localDatabase: widget.localDatabase,
           currentUser: widget.currentUser,
-          onSubmit: (payload) => _insertRow(module, module.toRow(payload)),
+          onSubmit: (payload) => _insertRow(module, {
+            ...module.toRow(payload),
+            // Keep form keys for Nest/local outbox routing (sales qty, etc.).
+            ...payload,
+          }),
         );
       },
     );
@@ -577,7 +881,7 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
         return FeedFormulationCreateSheet(
           currentUser: widget.currentUser,
           localDatabase: widget.localDatabase,
-          supabase: _supabase,
+          hatchlogApi: widget.hatchlogApi,
         );
       },
     );
@@ -1010,6 +1314,7 @@ class _UniversalMobileDashboardState extends State<UniversalMobileDashboard> {
                       permissions: widget.permissions,
                       localDatabase: widget.localDatabase,
                       remoteApi: widget.remoteApi,
+                      hatchlogApi: widget.hatchlogApi,
                       onRefreshFromCloud: widget.onRefreshFromCloud,
                       inputSink: widget.inputSink,
                       localSalesQueue: widget.localSalesQueue,
@@ -4343,20 +4648,6 @@ int _sumInt(List<Map<String, dynamic>> rows, List<String> keys) {
 
 double _sumDouble(List<Map<String, dynamic>> rows, List<String> keys) {
   return rows.fold(0, (sum, row) => sum + _double(row, keys));
-}
-
-int _ageWeeks(Map<String, dynamic> row) {
-  final value = _first(row, const [
-    'arrivalDate',
-    'date_hatched',
-    'hatched_at',
-    'hatch_date',
-  ]);
-  final hatched = DateTime.tryParse(value?.toString() ?? '');
-  if (hatched == null) {
-    return _int(row, const ['age_weeks', 'age_in_weeks']);
-  }
-  return DateTime.now().difference(hatched).inDays ~/ 7;
 }
 
 double _numPayload(Map<String, dynamic> payload, String key) {

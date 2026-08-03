@@ -1,8 +1,8 @@
 import 'package:flutter/foundation.dart';
 
+import '../core/api/hatchlog_api_client.dart';
 import '../core/permissions/farm_permissions.dart';
 import '../core/storage/local_database.dart';
-import '../features/auth/data/supabase_remote_api.dart';
 
 enum StrategicPriorityType { finance, stock, performance }
 
@@ -65,10 +65,10 @@ class ExecutiveDashboardSnapshot {
 }
 
 class ExecutiveMetricsService {
-  ExecutiveMetricsService(this._db, [this._remoteApi]);
+  ExecutiveMetricsService(this._db, [this._hatchlogApi]);
 
   final LocalDatabase _db;
-  final SupabaseRemoteApi? _remoteApi;
+  final HatchlogApiClient? _hatchlogApi;
 
   static const _feedCategories = {
     'feed',
@@ -236,16 +236,26 @@ class ExecutiveMetricsService {
   Future<List<Map<String, Object?>>> _hydrateBatchesFromCloud(
     String farmId,
   ) async {
-    final remoteApi = _remoteApi;
-    if (remoteApi == null || !remoteApi.isConfigured || farmId.isEmpty) {
+    if (farmId.isEmpty) {
+      return const [];
+    }
+
+    // Nest-owned livestock: prefer Nest list, never Supabase batches.
+    final nest = _hatchlogApi;
+    if (nest == null || !nest.isConfigured) {
       return const [];
     }
 
     List<Map<String, Object?>> cloudRows;
     try {
-      cloudRows = await remoteApi.fetchLivestockBatchesForFarm(farmId);
+      final livestock = await nest.listLivestock(farmId);
+      cloudRows = livestock
+          .whereType<Map>()
+          .map((raw) => _mapNestLivestockToLocal(raw, farmId))
+          .whereType<Map<String, Object?>>()
+          .toList(growable: false);
     } on Object catch (error) {
-      debugPrint('WARN: Executive livestock cloud fetch failed: $error');
+      debugPrint('WARN: Executive Nest livestock fetch failed: $error');
       return const [];
     }
 
@@ -261,6 +271,35 @@ class ExecutiveMetricsService {
 
     final localRows = await _loadLocalBatchRows(farmId);
     return localRows.isNotEmpty ? localRows : cloudRows;
+  }
+
+  Map<String, Object?>? _mapNestLivestockToLocal(
+    Map<dynamic, dynamic> raw,
+    String farmId,
+  ) {
+    final id = raw['id']?.toString();
+    if (id == null || id.isEmpty) {
+      return null;
+    }
+    return {
+      'id': id,
+      'farm_id': farmId,
+      'house_id': (raw['houseId'] ?? raw['house_id'])?.toString(),
+      'user_id': (raw['userId'] ?? raw['user_id'])?.toString(),
+      'batch_name': (raw['batchName'] ?? raw['batch_name'] ?? raw['name'])
+          ?.toString(),
+      'type': (raw['type'] ?? '')?.toString(),
+      'breed_type': (raw['breedType'] ?? raw['breed_type'])?.toString(),
+      'status': (raw['status'] ?? '')?.toString(),
+      'arrival_date':
+          (raw['arrivalDate'] ?? raw['arrival_date'])?.toString(),
+      'current_count': raw['currentCount'] ?? raw['current_count'] ?? 0,
+      'initial_count': raw['initialCount'] ?? raw['initial_count'] ?? 0,
+      'isolation_count':
+          raw['isolationCount'] ?? raw['isolation_count'] ?? 0,
+      'is_deleted': 0,
+      'is_synced': 1,
+    };
   }
 
   Future<double> _farmMortalityRate(

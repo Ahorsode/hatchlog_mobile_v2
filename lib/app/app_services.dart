@@ -1,0 +1,133 @@
+import 'dart:async';
+
+import '../core/api/hatchlog_api_client.dart';
+import '../core/config/hatchlog_api_config.dart';
+import '../core/connectivity/connectivity_service.dart';
+import '../core/license/license_service.dart';
+import '../core/permissions/permissions_repository.dart';
+import '../core/storage/device_identity_store.dart';
+import '../core/storage/local_database.dart';
+import '../core/storage/secure_credential_store.dart';
+import '../features/auth/data/auth_repository.dart';
+import '../features/auth/data/supabase_remote_api.dart';
+import '../features/management/data/management_repository.dart';
+import '../features/sync/data/sync_repository.dart';
+import '../features/sync/sync_engine_service.dart';
+import '../features/sync/sync_runner.dart';
+import '../services/encryption_service.dart';
+import '../services/local_sales_queue.dart';
+import '../services/pdf_invoice_service.dart';
+
+class AppServices {
+  AppServices({
+    required this.authRepository,
+    required this.connectivityService,
+    required this.managementRepository,
+    required this.permissionsRepository,
+    required this.syncRepository,
+    required this.syncRunner,
+    required this.encryptionService,
+    required this.localSalesQueue,
+    required this.pdfInvoiceService,
+    required this.remoteApi,
+    required this.hatchlogApi,
+    required this.localDatabase,
+    required this.licenseService,
+    required this.authRefreshSubscription,
+  });
+
+  final AuthRepository authRepository;
+  final ConnectivityService connectivityService;
+  final ManagementRepository managementRepository;
+  final PermissionsRepository permissionsRepository;
+  final SyncRepository syncRepository;
+  final SyncRunner syncRunner;
+  final EncryptionService encryptionService;
+  final LocalSalesQueue localSalesQueue;
+  final PdfInvoiceService pdfInvoiceService;
+  final SupabaseRemoteApi remoteApi;
+  final HatchlogApiClient hatchlogApi;
+  final LocalDatabase localDatabase;
+  final LicenseService licenseService;
+  final StreamSubscription<bool> authRefreshSubscription;
+
+  static Future<AppServices> bootstrap() async {
+    final localDatabase = LocalDatabase();
+    await localDatabase.initialize();
+    final licenseService = LicenseService(localDatabase);
+    localDatabase.setLicenseTouchHandler(licenseService.touchLastUsed);
+
+    final connectivityService = ConnectivityService();
+    final initiallyOnline = await connectivityService.isOnline;
+    final remoteApi = await SupabaseRemoteApi.fromEnvironment(
+      autoRefreshToken: initiallyOnline,
+    );
+    remoteApi.setAutoRefreshEnabled(initiallyOnline);
+    final hatchlogApi = HatchlogApiClient(
+      config: HatchlogApiConfig.load(),
+    );
+    final authRefreshSubscription = connectivityService.onOnlineChanged.listen(
+      remoteApi.setAutoRefreshEnabled,
+    );
+    final syncRepository = SyncRepository(
+      localDatabase: localDatabase,
+      remoteApi: remoteApi,
+      hatchlogApi: hatchlogApi,
+      syncEngineService: SyncEngineService(
+        localDatabase: localDatabase,
+        remoteApi: remoteApi,
+        hatchlogApi: hatchlogApi,
+      ),
+    );
+    final syncRunner = SyncRunner(
+      connectivityService: connectivityService,
+      syncRepository: syncRepository,
+    )..start();
+    final managementRepository = ManagementRepository(
+      localDatabase: localDatabase,
+      remoteApi: remoteApi,
+    );
+    final permissionsRepository = PermissionsRepository(
+      localDatabase: localDatabase,
+    );
+
+    final authRepository = AuthRepository(
+      connectivityService: connectivityService,
+      credentialStore: SecureCredentialStore(),
+      licenseService: licenseService,
+      localDatabase: localDatabase,
+      remoteApi: remoteApi,
+    );
+
+    final encryptionService = EncryptionService();
+    final deviceId = await DeviceIdentityStore.getOrCreate();
+    final localSalesQueue = LocalSalesQueue(
+      localDatabase: localDatabase,
+      encryptionService: encryptionService,
+      deviceId: deviceId,
+    );
+    final pdfService = PdfInvoiceService();
+
+    return AppServices(
+      authRepository: authRepository,
+      connectivityService: connectivityService,
+      managementRepository: managementRepository,
+      permissionsRepository: permissionsRepository,
+      syncRepository: syncRepository,
+      syncRunner: syncRunner,
+      encryptionService: encryptionService,
+      localSalesQueue: localSalesQueue,
+      pdfInvoiceService: pdfService,
+      remoteApi: remoteApi,
+      hatchlogApi: hatchlogApi,
+      localDatabase: localDatabase,
+      licenseService: licenseService,
+      authRefreshSubscription: authRefreshSubscription,
+    );
+  }
+
+  void dispose() {
+    authRefreshSubscription.cancel();
+    syncRunner.dispose();
+  }
+}

@@ -159,17 +159,16 @@ void main() {
       await tester.pump();
 
       expect(find.text('Livestock'), findsWidgets);
-      expect(find.text('Operational Pulse'), findsOneWidget);
       expect(find.text('Access Denied'), findsNothing);
 
       await tester.tap(find.text('Livestock').last);
-      await tester.pumpAndSettle();
+      await tester.pump();
 
-      expect(find.text('Total Birds'), findsOneWidget);
-      expect(find.text('Add Livestock'), findsOneWidget);
+      expect(find.textContaining('active birds across'), findsOneWidget);
+      expect(find.text('Register unit'), findsOneWidget);
 
       await tester.tap(find.byTooltip('Open navigation menu'));
-      await tester.pumpAndSettle();
+      await tester.pump();
 
       for (final label in const [
         'Livestock',

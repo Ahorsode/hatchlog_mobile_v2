@@ -153,60 +153,102 @@ class DashboardStatsService {
     final thirtyDaysAgo = today.subtract(const Duration(days: 30));
     final trendDates = _lastSevenDayLabels(today);
 
-    final batches = await _loadFarmBatches(farmId);
+    final parallel = await Future.wait<Object?>([
+      _loadFarmBatches(farmId),
+      _sumColumn(
+        'batches',
+        'initial_count',
+        farmId,
+        extraWhere: 'is_deleted = 0',
+      ),
+      _rawQuery(
+        "select coalesce(sum(count), 0) as total from mortality "
+        "where farm_id = ? and is_deleted = 0 and upper(type) = 'DEAD'",
+        [farmId],
+      ),
+      _rawQuery(
+        "select coalesce(sum(count), 0) as total from mortality "
+        "where farm_id = ? and is_deleted = 0 and upper(type) = 'DEAD' "
+        "and date(log_date) = date(?)",
+        [farmId, today.toIso8601String()],
+      ),
+      _queryRecords(
+        'inventory',
+        where: "farm_id = ? and is_deleted = 0 and upper(category) = 'EGGS'",
+        whereArgs: [farmId],
+        limit: 1,
+      ),
+      _rawQuery(
+        'select coalesce(sum(eggs_collected), 0) as total from egg_production '
+        'where farm_id = ? and is_deleted = 0 and date(log_date) = date(?)',
+        [farmId, today.toIso8601String()],
+      ),
+      _queryRecords(
+        'inventory',
+        where:
+            "farm_id = ? and is_deleted = 0 and lower(category) = 'feed' "
+            "and stock_level < 500",
+        whereArgs: [farmId],
+      ),
+      _rawQuery(
+        'select log_date, eggs_collected from egg_production '
+        'where farm_id = ? and is_deleted = 0 and date(log_date) >= date(?) '
+        'order by log_date asc',
+        [farmId, sevenDaysAgo.toIso8601String()],
+      ),
+      _rawQuery(
+        'select log_date, amount_consumed from daily_feeding_logs '
+        'where farm_id = ? and is_deleted = 0 and date(log_date) >= date(?) '
+        'order by log_date asc',
+        [farmId, sevenDaysAgo.toIso8601String()],
+      ),
+      _rawQuery(
+        "select log_date, count from mortality "
+        "where farm_id = ? and is_deleted = 0 and upper(type) = 'DEAD' "
+        "and date(log_date) >= date(?) order by log_date asc",
+        [farmId, sevenDaysAgo.toIso8601String()],
+      ),
+      permissions.canViewFinance
+          ? _rawQuery(
+              'select sale_date, total_amount from sales '
+              'where farm_id = ? and is_deleted = 0 and date(sale_date) >= date(?) '
+              'order by sale_date asc',
+              [farmId, sevenDaysAgo.toIso8601String()],
+            )
+          : Future.value(const <Map<String, Object?>>[]),
+      permissions.canViewFinance
+          ? _rawQuery(
+              'select order_date, total_amount from orders '
+              'where farm_id = ? and is_deleted = 0 and date(order_date) >= date(?) '
+              'order by order_date asc',
+              [farmId, sevenDaysAgo.toIso8601String()],
+            )
+          : Future.value(const <Map<String, Object?>>[]),
+    ], eagerError: false);
+
+    final batches = parallel[0] as List<Map<String, Object?>>;
     final totalBirds = batches.fold<int>(
       0,
       (sum, batch) => sum + _int(batch['current_count']),
     );
-
-    final initialBirds = await _sumColumn(
-      'batches',
-      'initial_count',
-      farmId,
-      extraWhere: 'is_deleted = 0',
+    final initialBirds = parallel[1] as double;
+    final overallDead = _int(
+      (parallel[2] as List<Map<String, Object?>>).first['total'],
     );
-    final overallDeadRows = await _db.rawLocalQuery(
-      "select coalesce(sum(count), 0) as total from mortality "
-      "where farm_id = ? and is_deleted = 0 and upper(type) = 'DEAD'",
-      [farmId],
-    );
-    final overallDead = _int(overallDeadRows.first['total']);
     final mortalityRate = initialBirds > 0
         ? (overallDead / initialBirds) * 100
         : 0.0;
-
-    final todayDeadRows = await _db.rawLocalQuery(
-      "select coalesce(sum(count), 0) as total from mortality "
-      "where farm_id = ? and is_deleted = 0 and upper(type) = 'DEAD' "
-      "and date(log_date) = date(?)",
-      [farmId, today.toIso8601String()],
+    final todayDead = _int(
+      (parallel[3] as List<Map<String, Object?>>).first['total'],
     );
-    final todayDead = _int(todayDeadRows.first['total']);
-
-    final eggInventoryRows = await _db.queryLocalRecords(
-      'inventory',
-      where: "farm_id = ? and is_deleted = 0 and upper(category) = 'EGGS'",
-      whereArgs: [farmId],
-      limit: 1,
-    );
+    final eggInventoryRows = parallel[4] as List<Map<String, Object?>>;
     final totalEggs = eggInventoryRows.isEmpty
         ? 0
         : _int(eggInventoryRows.first['stock_level']);
-
-    final todayEggsRows = await _db.rawLocalQuery(
-      'select coalesce(sum(eggs_collected), 0) as total from egg_production '
-      'where farm_id = ? and is_deleted = 0 and date(log_date) = date(?)',
-      [farmId, today.toIso8601String()],
+    final todayEggs = _int(
+      (parallel[5] as List<Map<String, Object?>>).first['total'],
     );
-    final todayEggs = _int(todayEggsRows.first['total']);
-
-    final lowFeedRows = await _db.queryLocalRecords(
-      'inventory',
-      where:
-          "farm_id = ? and is_deleted = 0 and lower(category) = 'feed' "
-          "and stock_level < 500",
-      whereArgs: [farmId],
-    );
+    final lowFeedRows = parallel[6] as List<Map<String, Object?>>;
     final lowFeedItems = lowFeedRows
         .map(
           (row) => (
@@ -216,42 +258,11 @@ class DashboardStatsService {
           ),
         )
         .toList(growable: false);
-
-    final recentEggs = await _db.rawLocalQuery(
-      'select log_date, eggs_collected from egg_production '
-      'where farm_id = ? and is_deleted = 0 and date(log_date) >= date(?) '
-      'order by log_date asc',
-      [farmId, sevenDaysAgo.toIso8601String()],
-    );
-    final recentFeed = await _db.rawLocalQuery(
-      'select log_date, amount_consumed from daily_feeding_logs '
-      'where farm_id = ? and is_deleted = 0 and date(log_date) >= date(?) '
-      'order by log_date asc',
-      [farmId, sevenDaysAgo.toIso8601String()],
-    );
-    final recentMortality = await _db.rawLocalQuery(
-      "select log_date, count from mortality "
-      "where farm_id = ? and is_deleted = 0 and upper(type) = 'DEAD' "
-      "and date(log_date) >= date(?) order by log_date asc",
-      [farmId, sevenDaysAgo.toIso8601String()],
-    );
-
-    final recentSales = permissions.canViewFinance
-        ? await _db.rawLocalQuery(
-            'select sale_date, total_amount from sales '
-            'where farm_id = ? and is_deleted = 0 and date(sale_date) >= date(?) '
-            'order by sale_date asc',
-            [farmId, sevenDaysAgo.toIso8601String()],
-          )
-        : const <Map<String, Object?>>[];
-    final recentOrders = permissions.canViewFinance
-        ? await _db.rawLocalQuery(
-            'select order_date, total_amount from orders '
-            'where farm_id = ? and is_deleted = 0 and date(order_date) >= date(?) '
-            'order by order_date asc',
-            [farmId, sevenDaysAgo.toIso8601String()],
-          )
-        : const <Map<String, Object?>>[];
+    final recentEggs = parallel[7] as List<Map<String, Object?>>;
+    final recentFeed = parallel[8] as List<Map<String, Object?>>;
+    final recentMortality = parallel[9] as List<Map<String, Object?>>;
+    final recentSales = parallel[10] as List<Map<String, Object?>>;
+    final recentOrders = parallel[11] as List<Map<String, Object?>>;
 
     final eggTrendData = _buildTrend(
       trendDates,
@@ -612,6 +623,27 @@ class DashboardStatsService {
       'is_deleted': 0,
       'is_synced': 1,
     };
+  }
+
+  Future<List<Map<String, Object?>>> _rawQuery(
+    String sql, [
+    List<Object?>? arguments,
+  ]) async {
+    return _db.rawLocalQuery(sql, arguments);
+  }
+
+  Future<List<Map<String, Object?>>> _queryRecords(
+    String table, {
+    String? where,
+    List<Object?>? whereArgs,
+    int? limit,
+  }) async {
+    return _db.queryLocalRecords(
+      table,
+      where: where,
+      whereArgs: whereArgs,
+      limit: limit,
+    );
   }
 
   Future<double> _sumColumn(

@@ -140,11 +140,13 @@ class _ActiveInventoryTab extends StatelessWidget {
         if (eggStock.totalEggs == 0 && items.isEmpty) {
           return const Center(child: Text('No in-stock inventory items.'));
         }
-        return ListView(
+        return ListView.builder(
           padding: const EdgeInsets.all(12),
-          children: [
-            if (eggStock.totalEggs > 0) ...[
-              Card(
+          itemCount: (eggStock.totalEggs > 0 ? 1 : 0) + items.length,
+          itemBuilder: (context, index) {
+            final hasEggHeader = eggStock.totalEggs > 0;
+            if (hasEggHeader && index == 0) {
+              return Card(
                 color: const Color(0xfffff8e8),
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -178,14 +180,14 @@ class _ActiveInventoryTab extends StatelessWidget {
                     ],
                   ),
                 ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            for (var index = 0; index < items.length; index += 1) ...[
-              if (index > 0) const SizedBox(height: 8),
-              _InventoryCard(item: items[index], onTap: onTap),
-            ],
-          ],
+              );
+            }
+            final itemIndex = hasEggHeader ? index - 1 : index;
+            return Padding(
+              padding: EdgeInsets.only(top: itemIndex > 0 || hasEggHeader ? 8 : 0),
+              child: _InventoryCard(item: items[itemIndex], onTap: onTap),
+            );
+          },
         );
       },
     );

@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../core/license/device_fingerprint.dart';
 import '../core/license/license_service.dart';
 import '../core/license/license_status.dart';
 import '../core/license/license_upgrade_launcher.dart';
@@ -48,8 +47,8 @@ class _HatchLogAppState extends State<HatchLogApp> {
 
   Future<void> _bootstrap() async {
     try {
-      final status = await _refreshLicenseStatus(renewFromCloud: true);
-      if (!mounted || _isBlockingLicenseStatus(status)) {
+      await _refreshLicenseStatus(renewFromCloud: true);
+      if (!mounted) {
         return;
       }
       await _restoreActiveSession();
@@ -85,11 +84,11 @@ class _HatchLogAppState extends State<HatchLogApp> {
       return;
     }
     final config = await widget.services.licenseService.getConfig();
-    final hardwareId = config?.hardwareId;
-    if (hardwareId == null || hardwareId.isEmpty) {
+    final farmId = config?.farmId;
+    if (farmId == null || farmId.isEmpty) {
       return;
     }
-    await widget.services.licenseService.renewFromCloud(hardwareId);
+    await widget.services.licenseService.renewFromCloud(farmId);
   }
 
   bool _isBlockingLicenseStatus(LicenseStatus status) {
@@ -108,8 +107,12 @@ class _HatchLogAppState extends State<HatchLogApp> {
 
   Future<void> _activateUser(AppUser user) async {
     final licenseStatus = await _refreshLicenseStatus(renewFromCloud: true);
-    if (!mounted || _isBlockingLicenseStatus(licenseStatus)) {
-      _clearActiveUser();
+    if (!mounted) {
+      return;
+    }
+
+    if (_isBlockingLicenseStatus(licenseStatus)) {
+      setState(() => _currentUser = user);
       return;
     }
 
@@ -130,12 +133,10 @@ class _HatchLogAppState extends State<HatchLogApp> {
     }
 
     if (online && !user.authenticatedOffline && userId.isNotEmpty && farmId.isNotEmpty) {
-      final hardwareId = await getDeviceHardwareId();
       final trialError = await widget.services.licenseService
           .initTrialFromCloud(
             userId: userId,
             farmId: farmId,
-            hardwareId: hardwareId,
           );
 
       if (!mounted) {
@@ -145,7 +146,10 @@ class _HatchLogAppState extends State<HatchLogApp> {
       if (trialError == LicenseService.trialExhaustedErrorCode) {
         final status = await widget.services.licenseService.checkLicense();
         if (mounted) {
-          setState(() => _licenseStatus = status);
+          setState(() {
+            _licenseStatus = status;
+            _currentUser = user;
+          });
         }
         return;
       }
@@ -265,7 +269,6 @@ class _HatchLogAppState extends State<HatchLogApp> {
     }
 
     if (_isBlockingLicenseStatus(status)) {
-      _clearActiveUser();
       return;
     }
 

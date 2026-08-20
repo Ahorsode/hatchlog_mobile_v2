@@ -4,7 +4,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../../core/connectivity/connectivity_service.dart';
 import '../../../core/config/google_auth_config.dart';
-import '../../../core/license/device_fingerprint.dart';
 import '../../../core/license/license_service.dart';
 import '../../../core/models/app_user.dart';
 import '../../../core/permissions/local_effective_farm_role_resolver.dart';
@@ -512,11 +511,9 @@ class AuthRepository {
       return;
     }
 
-    final hardwareId = await getDeviceHardwareId();
     final error = await _licenseService.initTrialFromCloud(
       userId: userId,
       farmId: farmId,
-      hardwareId: hardwareId,
     );
     if (error != null) {
       debugPrint('[License] Trial init warning: $error');

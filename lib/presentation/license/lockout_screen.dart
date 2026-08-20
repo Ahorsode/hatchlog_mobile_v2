@@ -43,9 +43,9 @@ class _LockoutScreenState extends State<LockoutScreen> {
     setState(() => _isChecking = true);
     try {
       final config = await widget.licenseService.getConfig();
-      final hardwareId = config?.hardwareId;
-      if (!_isClockTampered && hardwareId != null && hardwareId.isNotEmpty) {
-        await widget.licenseService.renewFromCloud(hardwareId);
+      final farmId = config?.farmId;
+      if (!_isClockTampered && farmId != null && farmId.isNotEmpty) {
+        await widget.licenseService.renewFromCloud(farmId);
       }
       final status = await widget.licenseService.checkLicense();
       if (!mounted) {

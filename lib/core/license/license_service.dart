@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../api/hatchlog_api_client.dart';
+import '../config/hatchlog_api_config.dart';
 import '../storage/local_database.dart';
 import 'license_status.dart';
 
@@ -88,124 +89,82 @@ class LicenseService {
   Future<String?> initTrialFromCloud({
     required String userId,
     required String farmId,
-    required String hardwareId,
+    String hardwareId = '',
   }) async {
     try {
-      final result = await Supabase.instance.client.rpc(
-        'register_device_trial',
-        params: {
-          'p_user_id': userId,
-          'p_farm_id': farmId,
-          'p_hardware_id': hardwareId,
-          'p_device_name': 'Mobile App',
-          'p_device_type': 'Mobile',
-        },
-      );
-      final data = _resultMap(result);
-      if (data == null) {
-        return 'Trial registration returned no data.';
+      final api = HatchlogApiClient(config: HatchlogApiConfig.load());
+      if (!api.isConfigured) {
+        return 'HatchLog API is not configured.';
       }
-      if (data['success'] != true) {
-        final errorCode = data['error_code']?.toString() ?? '';
-        if (errorCode == trialExhaustedErrorCode) {
-          final now = DateTime.now();
-          await _upsertConfig(
-            mode: 'HARD_LOCKED',
-            farmId: farmId,
-            userId: userId,
-            hardwareId: hardwareId,
-            installedAt: now,
-            expiresAt: now.subtract(const Duration(days: 36)),
-            lastCloudCheckAt: now,
-          );
-          return trialExhaustedErrorCode;
-        }
-
-        await _initLocalFallbackTrial(
-          userId: userId,
-          farmId: farmId,
-          hardwareId: hardwareId,
-        );
-        return data['error']?.toString() ?? 'Trial registration failed.';
-      }
-
-      final now = DateTime.now();
-      final expiresAt =
-          DateTime.tryParse(data['license_expires_at']?.toString() ?? '') ??
-          now.add(const Duration(days: 30));
-
-      await _upsertConfig(
-        mode: _serverStatusToLocalMode(
-          data['license_status']?.toString() ?? 'CLOUD_TRIAL',
-        ),
+      final data = await api.getSubscriptionStatus(farmId);
+      await applyFarmStatus(
+        data,
         farmId: farmId,
         userId: userId,
         hardwareId: hardwareId,
-        installedAt: now,
-        expiresAt: expiresAt,
-        lastCloudCheckAt: now,
       );
+      if (data['status']?.toString() == 'locked') {
+        return trialExhaustedErrorCode;
+      }
       return null;
-    } on Object {
-      await _initLocalFallbackTrial(
-        userId: userId,
-        farmId: farmId,
-        hardwareId: hardwareId,
-      );
-      return null;
+    } on Object catch (error) {
+      debugPrint('[License] initTrialFromCloud error: $error');
+      return 'Could not read farm subscription status.';
     }
   }
 
-  Future<void> renewFromCloud(String hardwareId) async {
+  Future<void> renewFromCloud([String? farmOrHardwareId]) async {
     try {
-      final result = await Supabase.instance.client.rpc(
-        'get_device_subscription_status',
-        params: {'p_hardware_id': hardwareId},
-      );
-      final data = _resultMap(result);
-      if (data == null || data['success'] != true) {
-        return;
-      }
-
-      final serverExpiry = DateTime.tryParse(
-        data['license_expires_at']?.toString() ?? '',
-      );
-      final statusStr = data['license_status']?.toString();
-      final now = DateTime.now();
       final config = await _loadConfig();
-      if (config == null) {
+      final farmId = (config?.farmId != null && config!.farmId!.isNotEmpty)
+          ? config.farmId!
+          : farmOrHardwareId;
+      if (farmId == null || farmId.isEmpty) {
         return;
       }
-
-      final updates = <String, Object?>{
-        'last_used': now.toIso8601String(),
-        'last_cloud_check_at': now.toIso8601String(),
-      };
-      if (serverExpiry != null && serverExpiry.isAfter(config.expiresAt)) {
-        updates['expires_at'] = serverExpiry.toIso8601String();
+      final api = HatchlogApiClient(config: HatchlogApiConfig.load());
+      if (!api.isConfigured) {
+        return;
       }
-      // Check the trial_exhausted flag BEFORE writing any updates.
-      // If the server says the trial is exhausted and we're not in an active paid state,
-      // hard-lock immediately — identical to how desktop handles this.
-      final trialExhausted = data['trial_exhausted'] == true;
-      final resolvedMode =
-          statusStr != null ? _serverStatusToLocalMode(statusStr) : null;
-      final isActive = resolvedMode == 'CLOUD_ACTIVE';
-
-      if (trialExhausted && !isActive) {
-        await _setMode('HARD_LOCKED');
-        debugPrint('[License] Server reports trial exhausted — forcing hard lock.');
-        return; // skip the normal update to avoid accidentally unlocking
-      }
-
-      if (resolvedMode != null) {
-        updates['mode'] = resolvedMode;
-      }
-
-      await _db.rawLocalUpdate('license_configs', updates, "id = 'singleton'");
+      final data = await api.getSubscriptionStatus(farmId);
+      await applyFarmStatus(
+        data,
+        farmId: farmId,
+        userId: config?.userId,
+        hardwareId: config?.hardwareId ?? '',
+      );
     } on Object {
-      // Offline or transient cloud failure: desktop silently keeps local state.
+      // Offline: keep local farm clock.
     }
+  }
+
+  Future<void> applyFarmStatus(
+    Map<String, dynamic> data, {
+    required String farmId,
+    String? userId,
+    String hardwareId = '',
+  }) async {
+    final now = DateTime.now();
+    final status = data['status']?.toString() ?? 'locked';
+    final periodEndsAt =
+        DateTime.tryParse(data['periodEndsAt']?.toString() ?? '') ?? now;
+    final mode = switch (status) {
+      'paid' => 'CLOUD_ACTIVE',
+      'trial' => 'CLOUD_TRIAL',
+      _ => 'HARD_LOCKED',
+    };
+    final config = await _loadConfig();
+    await _upsertConfig(
+      mode: mode,
+      farmId: farmId,
+      userId: userId ?? config?.userId,
+      hardwareId: hardwareId.isNotEmpty
+          ? hardwareId
+          : (config?.hardwareId ?? ''),
+      installedAt: config?.installedAt ?? now,
+      expiresAt: periodEndsAt,
+      lastCloudCheckAt: now,
+    );
   }
 
   Future<void> touchLastUsed() async {
@@ -219,27 +178,6 @@ class LicenseService {
   }
 
   Future<LicenseConfig?> getConfig() => _loadConfig();
-
-  Future<void> _initLocalFallbackTrial({
-    required String userId,
-    required String farmId,
-    required String hardwareId,
-  }) async {
-    if (await _loadConfig() != null) {
-      return;
-    }
-
-    final now = DateTime.now();
-    await _upsertConfig(
-      mode: 'CLOUD_TRIAL',
-      farmId: farmId,
-      userId: userId,
-      hardwareId: hardwareId,
-      installedAt: now,
-      expiresAt: now.add(const Duration(days: 30)),
-      lastCloudCheckAt: null,
-    );
-  }
 
   Future<LicenseConfig?> _loadConfig() async {
     final rows = await _db.rawLocalQuery(
@@ -278,42 +216,5 @@ class LicenseService {
     await _db.rawLocalUpdate('license_configs', {
       'mode': mode,
     }, "id = 'singleton'");
-  }
-
-  String _serverStatusToLocalMode(String status) {
-    return switch (status) {
-      // All paid/active variants — web writes any of these depending on path
-      'ACTIVE' => 'CLOUD_ACTIVE',
-      'PAID_AND_ACTIVE' => 'CLOUD_ACTIVE', // written by adminUpgradeFarmTier (web)
-      'PAID_STANDARD' => 'CLOUD_ACTIVE', // written by RPC after standard upgrade
-      'PAID_PREMIUM' => 'CLOUD_ACTIVE', // written by RPC after premium upgrade
-
-      // Trial
-      'CLOUD_TRIAL' => 'CLOUD_TRIAL',
-
-      // Expired / exhausted
-      'EXPIRED' => 'EXPIRED',
-      'TRIAL_EXPIRED' => 'EXPIRED',
-      'GRACE_PERIOD' => 'EXPIRED',
-
-      // Revoked by admin — treat as hard locked immediately
-      'REVOKED' => 'HARD_LOCKED',
-
-      // Unknown future status — log it, keep local state rather than downgrading to trial
-      _ => () {
-        debugPrint('[License] Unrecognised server status: $status');
-        return 'CLOUD_TRIAL';
-      }(),
-    };
-  }
-
-  Map<String, dynamic>? _resultMap(Object? result) {
-    if (result is Map) {
-      return Map<String, dynamic>.from(result);
-    }
-    if (result is List && result.isNotEmpty && result.first is Map) {
-      return Map<String, dynamic>.from(result.first as Map);
-    }
-    return null;
   }
 }

@@ -108,6 +108,13 @@ class HatchlogApiClient {
   Future<List<dynamic>> listFarms() =>
       _requestList(method: 'GET', path: '/api/v1/farms');
 
+  Future<Map<String, dynamic>> getSubscriptionStatus(String farmId) =>
+      _requestJsonUnwrap(
+        method: 'GET',
+        path: '/api/v1/subscriptions/status',
+        query: {'farm_id': farmId},
+      );
+
   Future<List<dynamic>> listLivestock(String farmId) => _requestList(
         method: 'GET',
         path: '/api/v1/livestock',

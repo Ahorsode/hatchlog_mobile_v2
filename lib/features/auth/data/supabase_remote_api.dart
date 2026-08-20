@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../core/config/mobile_oauth_config.dart';
 import '../../../core/config/supabase_config.dart';
 import '../../../core/models/app_user.dart';
 import '../../../core/permissions/farm_permissions.dart';
@@ -47,9 +50,20 @@ class SupabaseRemoteApi {
     final supabase = await Supabase.initialize(
       url: config.url,
       anonKey: config.clientKey,
-      authOptions: FlutterAuthClientOptions(autoRefreshToken: autoRefreshToken),
+      authOptions: FlutterAuthClientOptions(
+        authFlowType: AuthFlowType.pkce,
+        autoRefreshToken: autoRefreshToken,
+      ),
     );
     return SupabaseRemoteApi._(supabase.client);
+  }
+
+  Stream<AuthState> get authStateChanges {
+    final client = _client;
+    if (client == null) {
+      return const Stream.empty();
+    }
+    return client.auth.onAuthStateChange;
   }
 
   void setAutoRefreshEnabled(bool enabled) {
@@ -202,6 +216,84 @@ class SupabaseRemoteApi {
       throw const AuthException('Supabase did not return a Google user.');
     }
 
+    return _resolveGoogleProfileAfterAuth(
+      authUser: authUser,
+      requestedEmail: requestedEmail,
+      profileBeforeSignIn: profileBeforeSignIn,
+    );
+  }
+
+  /// Opens Google via Supabase OAuth (same provider as the web app).
+  Future<MobileGoogleAuthResult> signInWithGoogleOAuth() async {
+    final client = _requireClient();
+    await client.auth.signOut();
+
+    final completer = Completer<MobileGoogleAuthResult>();
+    late StreamSubscription<AuthState> subscription;
+    var oauthStarted = false;
+
+    subscription = client.auth.onAuthStateChange.listen((data) async {
+      if (!oauthStarted) {
+        return;
+      }
+      if (data.event != AuthChangeEvent.signedIn || data.session == null) {
+        return;
+      }
+
+      await subscription.cancel();
+      try {
+        final authUser = data.session!.user;
+        final requestedEmail = _asString(authUser.email).trim().toLowerCase();
+        final profileBeforeSignIn = requestedEmail.isEmpty
+            ? null
+            : await _safeReadWebUserProfileByEmail(requestedEmail);
+        final result = await _resolveGoogleProfileAfterAuth(
+          authUser: authUser,
+          requestedEmail: requestedEmail,
+          profileBeforeSignIn: profileBeforeSignIn,
+        );
+        if (!completer.isCompleted) {
+          completer.complete(result);
+        }
+      } on Object catch (error, stackTrace) {
+        if (!completer.isCompleted) {
+          completer.completeError(error, stackTrace);
+        }
+      }
+    });
+
+    try {
+      oauthStarted = true;
+      await client.auth.signInWithOAuth(
+        OAuthProvider.google,
+        redirectTo: mobileGoogleOAuthRedirectUrl,
+        authScreenLaunchMode: LaunchMode.externalApplication,
+      );
+    } on Object catch (error, stackTrace) {
+      await subscription.cancel();
+      if (!completer.isCompleted) {
+        completer.completeError(error, stackTrace);
+      }
+    }
+
+    return completer.future.timeout(
+      const Duration(minutes: 5),
+      onTimeout: () async {
+        await subscription.cancel();
+        await client.auth.signOut();
+        throw const AuthException(
+          'Google sign-in timed out. Close the browser and try again.',
+        );
+      },
+    );
+  }
+
+  Future<MobileGoogleAuthResult> _resolveGoogleProfileAfterAuth({
+    required User authUser,
+    required String requestedEmail,
+    Map<String, dynamic>? profileBeforeSignIn,
+  }) async {
+    final client = _requireClient();
     final authenticatedEmail = _asString(authUser.email).trim().toLowerCase();
     final lookupEmail = authenticatedEmail.isEmpty
         ? requestedEmail

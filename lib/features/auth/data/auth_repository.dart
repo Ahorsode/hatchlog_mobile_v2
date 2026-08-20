@@ -271,6 +271,42 @@ class AuthRepository {
       );
     }
 
+    try {
+      return await _authenticateWithGoogleOAuth();
+    } on AuthException catch (error) {
+      throw AuthFailure(error.message);
+    } on AuthFailure {
+      rethrow;
+    } on Object catch (error) {
+      debugPrint('Google OAuth sign-in failed, trying native fallback: $error');
+      final config = await GoogleAuthConfig.load();
+      final canUseNative =
+          config.isConfigured &&
+          (defaultTargetPlatform != TargetPlatform.android ||
+              config.androidClientId.isNotEmpty);
+      if (!canUseNative) {
+        throw const AuthFailure('Google sign-in could not be completed.');
+      }
+      return _authenticateWithNativeGoogle();
+    }
+  }
+
+  Future<AuthResult> _authenticateWithGoogleOAuth() async {
+    final socialResult = await _remoteApi.signInWithGoogleOAuth();
+    isNewMobileSocialRegistrant.value =
+        socialResult.isNewMobileSocialRegistrant;
+    await _persistSession(socialResult.user);
+    await _initTrialForUser(socialResult.user);
+    return AuthResult(
+      user: socialResult.user,
+      mode: socialResult.isNewMobileSocialRegistrant
+          ? AuthMode.socialRegistrationRequired
+          : AuthMode.cloud,
+      isNewMobileSocialRegistrant: socialResult.isNewMobileSocialRegistrant,
+    );
+  }
+
+  Future<AuthResult> _authenticateWithNativeGoogle() async {
     await _ensureGoogleInitialized();
     if (!_googleSignIn.supportsAuthenticate()) {
       throw const AuthFailure(
@@ -303,15 +339,23 @@ class AuthRepository {
         accessToken: accessToken,
         email: googleUser.email,
       );
-      isNewMobileSocialRegistrant.value = false;
+      isNewMobileSocialRegistrant.value =
+          socialResult.isNewMobileSocialRegistrant;
       await _persistSession(socialResult.user);
       await _initTrialForUser(socialResult.user);
-      return AuthResult(user: socialResult.user, mode: AuthMode.cloud);
+      return AuthResult(
+        user: socialResult.user,
+        mode: socialResult.isNewMobileSocialRegistrant
+            ? AuthMode.socialRegistrationRequired
+            : AuthMode.cloud,
+        isNewMobileSocialRegistrant: socialResult.isNewMobileSocialRegistrant,
+      );
     } on AuthFailure {
       rethrow;
     } on AuthException catch (error) {
       throw AuthFailure(error.message);
-    } on Object {
+    } on Object catch (error) {
+      debugPrint('Native Google sign-in failed: $error');
       throw const AuthFailure('Google sign-in could not be completed.');
     }
   }

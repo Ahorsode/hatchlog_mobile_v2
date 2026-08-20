@@ -210,7 +210,7 @@ class _LoginScreenState extends State<LoginScreen> {
                                   ),
                                 )
                               : const Icon(Icons.account_circle_outlined),
-                          label: const Text('Native Google Sign-In'),
+                          label: const Text('Continue with Google'),
                           style: OutlinedButton.styleFrom(
                             minimumSize: const Size.fromHeight(54),
                             shape: RoundedRectangleBorder(

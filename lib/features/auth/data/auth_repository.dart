@@ -43,6 +43,11 @@ class AuthFailure implements Exception {
   String toString() => message;
 }
 
+/// Thrown when the user dismisses the Google account picker without signing in.
+class AuthCancelled implements Exception {
+  const AuthCancelled();
+}
+
 class AuthRepository {
   AuthRepository({
     required ConnectivityService connectivityService,
@@ -271,6 +276,31 @@ class AuthRepository {
       );
     }
 
+    final config = await GoogleAuthConfig.load();
+    if (_canUseNativeGoogleSignIn(config)) {
+      try {
+        return await _authenticateWithNativeGoogle();
+      } on AuthCancelled {
+        rethrow;
+      } on AuthFailure {
+        rethrow;
+      } on AuthException catch (error) {
+        throw AuthFailure(error.message);
+      } on Object catch (error) {
+        debugPrint(
+          'Native Google sign-in failed, trying browser OAuth fallback: $error',
+        );
+        return _authenticateWithGoogleOAuth();
+      }
+    }
+
+    if (!config.isConfigured) {
+      throw const AuthFailure(
+        'Google sign-in is not configured for this build. Add GOOGLE_WEB_CLIENT_ID '
+        'and GOOGLE_ANDROID_CLIENT_ID to .env.mobile.',
+      );
+    }
+
     try {
       return await _authenticateWithGoogleOAuth();
     } on AuthException catch (error) {
@@ -278,17 +308,21 @@ class AuthRepository {
     } on AuthFailure {
       rethrow;
     } on Object catch (error) {
-      debugPrint('Google OAuth sign-in failed, trying native fallback: $error');
-      final config = await GoogleAuthConfig.load();
-      final canUseNative =
-          config.isConfigured &&
-          (defaultTargetPlatform != TargetPlatform.android ||
-              config.androidClientId.isNotEmpty);
-      if (!canUseNative) {
-        throw const AuthFailure('Google sign-in could not be completed.');
-      }
-      return _authenticateWithNativeGoogle();
+      debugPrint('Google OAuth sign-in failed: $error');
+      throw const AuthFailure('Google sign-in could not be completed.');
     }
+  }
+
+  bool _canUseNativeGoogleSignIn(GoogleAuthConfig config) {
+    if (!config.isConfigured) {
+      return false;
+    }
+
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.android => config.androidClientId.isNotEmpty,
+      TargetPlatform.iOS => true,
+      _ => false,
+    };
   }
 
   Future<AuthResult> _authenticateWithGoogleOAuth() async {
@@ -352,11 +386,43 @@ class AuthRepository {
       );
     } on AuthFailure {
       rethrow;
+    } on GoogleSignInException catch (error) {
+      throw _mapGoogleSignInException(error);
     } on AuthException catch (error) {
       throw AuthFailure(error.message);
     } on Object catch (error) {
       debugPrint('Native Google sign-in failed: $error');
       throw const AuthFailure('Google sign-in could not be completed.');
+    }
+  }
+
+  Exception _mapGoogleSignInException(GoogleSignInException error) {
+    switch (error.code) {
+      case GoogleSignInExceptionCode.canceled:
+        return const AuthCancelled();
+      case GoogleSignInExceptionCode.clientConfigurationError:
+      case GoogleSignInExceptionCode.providerConfigurationError:
+        final detail = (error.description ?? '').trim();
+        return AuthFailure(
+          detail.isEmpty
+              ? 'Google sign-in is misconfigured. Verify GOOGLE_WEB_CLIENT_ID, '
+                    'GOOGLE_ANDROID_CLIENT_ID, and the Android SHA-1 fingerprint '
+                    'in Google Cloud Console.'
+              : detail,
+        );
+      case GoogleSignInExceptionCode.uiUnavailable:
+        return const AuthFailure(
+          'Google sign-in could not open. Close other apps and try again.',
+        );
+      case GoogleSignInExceptionCode.interrupted:
+      case GoogleSignInExceptionCode.userMismatch:
+      case GoogleSignInExceptionCode.unknownError:
+        final detail = (error.description ?? '').trim();
+        return AuthFailure(
+          detail.isEmpty
+              ? 'Google sign-in could not be completed.'
+              : detail,
+        );
     }
   }
 
@@ -422,6 +488,13 @@ class AuthRepository {
     await _localDatabase.clearOperationalFarmCache();
     await _localDatabase.clearFarmSyncCursors();
     await _localDatabase.clearSessionContext();
+    if (_googleInitialized) {
+      try {
+        await _googleSignIn.signOut();
+      } on Object catch (error) {
+        debugPrint('WARN: Google sign-out failed: $error');
+      }
+    }
     if (await _connectivityService.isOnline) {
       await _remoteApi.signOut();
     }

@@ -107,6 +107,8 @@ class _LoginScreenState extends State<LoginScreen> {
         return;
       }
       await _handleAuthResult(result);
+    } on AuthCancelled {
+      // User closed the Google account picker — no error banner needed.
     } on AuthFailure catch (error) {
       _showAuthError(error.message);
     } catch (_) {
